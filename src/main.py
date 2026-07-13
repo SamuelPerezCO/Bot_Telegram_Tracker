@@ -1,3 +1,9 @@
+"""Entry point of the tracker bot (t.me/Tracker90Bot).
+
+Loads the token from .env, prepares the database and wires the
+conversation flow before starting the polling loop.
+"""
+
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes , MessageHandler , filters , ConversationHandler , CallbackQueryHandler
 from dotenv import load_dotenv
 from telegram import Update
