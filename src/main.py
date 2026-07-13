@@ -4,10 +4,13 @@ from telegram import Update
 import os
 
 from Controllers import tracker_controller
+from Models import streak_model
 
 
 load_dotenv()
 TOKEN_BOT = os.getenv("TOKEN_BOT")
+
+streak_model.create_table()
 
 application = ApplicationBuilder().token(TOKEN_BOT).build()
 conversation = ConversationHandler(

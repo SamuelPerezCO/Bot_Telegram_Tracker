@@ -1,8 +1,10 @@
 from telegram import Update , ReplyKeyboardRemove ,InlineKeyboardMarkup , InlineKeyboardButton , KeyboardButton , ReplyKeyboardMarkup
 from telegram.ext import ContextTypes , ConversationHandler , CallbackContext
 
-WHO_ARE_YOU = 0   
-MENU = 1          
+from Models import streak_model
+
+WHO_ARE_YOU = 0
+MENU = 1
 
 class tracker_controller:
 
@@ -19,21 +21,24 @@ class tracker_controller:
         keyboard = ReplyKeyboardMarkup([
             [KeyboardButton("I want to report a new day") , KeyboardButton("I want to report that I lose")]
         ])
-        if update.message.text == "El Hi":
-            await update.message.reply_text("Your Current Streak Is EL HI" , reply_markup=ReplyKeyboardRemove())
-            await update.message.reply_text("What do you want to do?" , reply_markup=keyboard)
-        else:
-            await update.message.reply_text("Your Current Streak Is TORNILLO" , reply_markup=ReplyKeyboardRemove())
-            await update.message.reply_text("What do you want to do?" , reply_markup=keyboard)
+        streak = streak_model.get_streak(update.effective_user.id)
+        await update.message.reply_text(f"Your Current Streak Is {streak} 🔥" , reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text("What do you want to do?" , reply_markup=keyboard)
         return MENU
 
     @staticmethod
     async def report_new_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
         if update.message.text == "I want to report a new day":
-            await update.message.reply_text("You won" , reply_markup=ReplyKeyboardRemove())
+            streak , counted = streak_model.report_day(user.id , user.username)
+            if counted:
+                await update.message.reply_text(f"Day reported! Your streak is now {streak} 🔥" , reply_markup=ReplyKeyboardRemove())
+            else:
+                await update.message.reply_text(f"You already reported today. Your streak is {streak} 🔥" , reply_markup=ReplyKeyboardRemove())
             return ConversationHandler.END
         elif update.message.text == "I want to report that I lose":
-            await update.message.reply_text("You are gay" , reply_markup=ReplyKeyboardRemove())
+            streak_model.reset_streak(user.id , user.username)
+            await update.message.reply_text("Streak reset to 0. Start again tomorrow 💪" , reply_markup=ReplyKeyboardRemove())
             return ConversationHandler.END
         else:
             await update.message.reply_text("Please use one of the buttons")
