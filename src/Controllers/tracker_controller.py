@@ -49,7 +49,7 @@ class tracker_controller:
         keyboard = ReplyKeyboardMarkup([
             [KeyboardButton("I want to report a new day") , KeyboardButton("I want to report that I lose")]
         ])
-        streak = streak_model.get_streak(update.effective_user.id)
+        streak = await streak_model.get_streak(context.bot , update.effective_chat.id)
         await update.message.reply_text(f"Your Current Streak Is {streak} 🔥" , reply_markup=ReplyKeyboardRemove())
         await update.message.reply_text("What do you want to do?" , reply_markup=keyboard)
         return MENU
@@ -66,16 +66,16 @@ class tracker_controller:
             int: ConversationHandler.END when the report is processed,
             or MENU again if the message matched no button.
         """
-        user = update.effective_user
+        chat_id = update.effective_chat.id
         if update.message.text == "I want to report a new day":
-            streak , counted = streak_model.report_day(user.id , user.username)
+            streak , counted = await streak_model.report_day(context.bot , chat_id)
             if counted:
                 await update.message.reply_text(f"Day reported! Your streak is now {streak} 🔥" , reply_markup=ReplyKeyboardRemove())
             else:
                 await update.message.reply_text(f"You already reported today. Your streak is {streak} 🔥" , reply_markup=ReplyKeyboardRemove())
             return ConversationHandler.END
         elif update.message.text == "I want to report that I lose":
-            streak_model.reset_streak(user.id , user.username)
+            await streak_model.reset_streak(context.bot , chat_id)
             await update.message.reply_text("Streak reset to 0. Start again tomorrow 💪" , reply_markup=ReplyKeyboardRemove())
             return ConversationHandler.END
         else:

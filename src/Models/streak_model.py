@@ -1,74 +1,111 @@
-"""SQLite persistence for user streaks.
+"""Streak storage inside Telegram itself (no database).
 
-This module owns everything related to storing streaks: the database
-connection, the table schema and the streak rules (continue, restart,
-already-reported). Controllers should never touch SQL directly.
+Telegram bots cannot read the chat history, but they CAN read the
+chat's pinned message through get_chat. This module uses that: the
+bot keeps each user's streak in a pinned status message, so the data
+lives in Telegram, survives restarts/redeploys and needs no database.
 """
 
-import sqlite3
-import os
+import re
 from datetime import date , timedelta
 
-DB_PATH = os.path.join(os.path.dirname(__file__) , ".." , "streaks.db")
 
+def _format_status(streak , last_report):
+    """Builds the text of the pinned status message.
 
-def get_connection():
-    """Opens a connection to the streaks database.
+    Args:
+        streak (int): Current streak value.
+        last_report (str): ISO date of the last report, or "none".
 
     Returns:
-        sqlite3.Connection: An open connection. The caller is responsible
-        for closing it.
+        str: The status message text.
     """
-    return sqlite3.connect(DB_PATH)
+    return f"🔥 Streak: {streak} (last report: {last_report})"
 
 
-def create_table():
-    """Creates the users table if it does not exist yet.
+def _parse_status(text):
+    """Extracts the streak data from a pinned message text.
 
-    Must be called once at startup, before the bot starts handling
-    updates. Safe to call on every run thanks to IF NOT EXISTS.
+    Args:
+        text (str): Text of the pinned message (may be anything).
+
+    Returns:
+        tuple[int, str] | None: (streak, last_report) if the text is a
+        status message written by the bot, otherwise None.
     """
-    connection = get_connection()
-    connection.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            current_streak INTEGER DEFAULT 0,
-            last_report TEXT
-        )
-    """)
-    connection.commit()
-    connection.close()
+    match = re.search(r"Streak: (\d+) \(last report: (\S+)\)" , text or "")
+    if match is None:
+        return None
+    return int(match.group(1)) , match.group(2)
 
 
-def get_streak(user_id):
+async def _read_status(bot , chat_id):
+    """Reads the streak data stored in the chat's pinned message.
+
+    Args:
+        bot: The bot instance (context.bot).
+        chat_id (int): Private chat id (same as the user id).
+
+    Returns:
+        tuple[int, str] | None: (streak, last_report), or None if there
+        is no pinned status message.
+    """
+    chat = await bot.get_chat(chat_id)
+    if chat.pinned_message is None:
+        return None
+    return _parse_status(chat.pinned_message.text)
+
+
+async def _write_status(bot , chat_id , streak , last_report):
+    """Saves the streak by sending and pinning a new status message.
+
+    The previous status message is unpinned (and deleted when Telegram
+    still allows it - bots can only delete messages younger than 48h).
+
+    Args:
+        bot: The bot instance (context.bot).
+        chat_id (int): Private chat id.
+        streak (int): New streak value.
+        last_report (str): ISO date of the last report, or "none".
+    """
+    old_pinned = (await bot.get_chat(chat_id)).pinned_message
+    message = await bot.send_message(chat_id , _format_status(streak , last_report))
+    await bot.pin_chat_message(chat_id , message.message_id , disable_notification=True)
+    if old_pinned is not None and _parse_status(old_pinned.text) is not None:
+        try:
+            await bot.unpin_chat_message(chat_id , old_pinned.message_id)
+            await bot.delete_message(chat_id , old_pinned.message_id)
+        except Exception:
+            pass  # older than 48h: Telegram refuses the delete, not a problem
+
+
+async def get_streak(bot , chat_id):
     """Reads the current streak of a user.
 
     Args:
-        user_id (int): Telegram user id.
+        bot: The bot instance (context.bot).
+        chat_id (int): Private chat id (same as the user id).
 
     Returns:
-        int: The current streak, or 0 if the user has never reported.
+        int: The current streak, or 0 if there is no status yet.
     """
-    connection = get_connection()
-    row = connection.execute("SELECT current_streak FROM users WHERE user_id = ?" , (user_id,)).fetchone()
-    connection.close()
-    if row is None:
+    status = await _read_status(bot , chat_id)
+    if status is None:
         return 0
-    return row[0]
+    return status[0]
 
 
-def report_day(user_id , username):
+async def report_day(bot , chat_id):
     """Registers today as a completed day and updates the streak.
 
     The streak rules are:
         - Last report was today: nothing changes, the report does not count.
         - Last report was yesterday: the streak continues (+1).
-        - Last report is older, or the user is new: the streak restarts at 1.
+        - Last report is older, or there is no status yet: restarts at 1.
 
     Args:
-        user_id (int): Telegram user id.
-        username (str): Telegram username, stored only for readability.
+        bot: The bot instance (context.bot).
+        chat_id (int): Private chat id.
 
     Returns:
         tuple[int, bool]: The streak after the report, and whether the
@@ -77,48 +114,27 @@ def report_day(user_id , username):
     today = date.today().isoformat()
     yesterday = (date.today() - timedelta(days=1)).isoformat()
 
-    connection = get_connection()
-    row = connection.execute("SELECT current_streak , last_report FROM users WHERE user_id = ?" , (user_id,)).fetchone()
-
-    if row is None:
+    status = await _read_status(bot , chat_id)
+    if status is None:
         new_streak = 1
-        connection.execute(
-            "INSERT INTO users (user_id , username , current_streak , last_report) VALUES (? , ? , ? , ?)" ,
-            (user_id , username , new_streak , today)
-        )
     else:
-        current_streak , last_report = row
+        current_streak , last_report = status
         if last_report == today:
-            connection.close()
             return current_streak , False
         elif last_report == yesterday:
             new_streak = current_streak + 1
         else:
             new_streak = 1
-        connection.execute(
-            "UPDATE users SET current_streak = ? , last_report = ? , username = ? WHERE user_id = ?" ,
-            (new_streak , today , username , user_id)
-        )
 
-    connection.commit()
-    connection.close()
+    await _write_status(bot , chat_id , new_streak , today)
     return new_streak , True
 
 
-def reset_streak(user_id , username):
+async def reset_streak(bot , chat_id):
     """Sets the user's streak back to 0 (they lost).
 
-    Creates the user row if it does not exist yet.
-
     Args:
-        user_id (int): Telegram user id.
-        username (str): Telegram username, stored only for readability.
+        bot: The bot instance (context.bot).
+        chat_id (int): Private chat id.
     """
-    connection = get_connection()
-    connection.execute(
-        """INSERT INTO users (user_id , username , current_streak , last_report) VALUES (? , ? , 0 , NULL)
-           ON CONFLICT(user_id) DO UPDATE SET current_streak = 0 , last_report = NULL""" ,
-        (user_id , username)
-    )
-    connection.commit()
-    connection.close()
+    await _write_status(bot , chat_id , 0 , "none")

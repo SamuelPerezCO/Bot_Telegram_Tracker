@@ -1,7 +1,8 @@
 """Entry point of the tracker bot (t.me/Tracker90Bot).
 
-Loads the token from .env, prepares the database and wires the
-conversation flow before starting the polling loop.
+Loads the token from .env and wires the conversation flow before
+starting the polling loop. Streaks are stored in each chat's pinned
+message (see Models.streak_model), so no database is needed.
 """
 
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes , MessageHandler , filters , ConversationHandler , CallbackQueryHandler
@@ -10,13 +11,10 @@ from telegram import Update
 import os
 
 from Controllers import tracker_controller
-from Models import streak_model
 
 
 load_dotenv()
 TOKEN_BOT = os.getenv("TOKEN_BOT")
-
-streak_model.create_table()
 
 application = ApplicationBuilder().token(TOKEN_BOT).build()
 conversation = ConversationHandler(

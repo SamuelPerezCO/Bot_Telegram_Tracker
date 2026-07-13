@@ -12,7 +12,8 @@ Bot: [t.me/Tracker90Bot](https://t.me/Tracker90Bot)
 - Report a completed day (only counts once per day)
 - Streak continues if you reported yesterday, restarts if you missed a day
 - Reset your streak when you lose
-- Streaks stored in a local SQLite database
+- No database: the streak is stored in the chat's pinned message
+- Your current streak is always visible at the top of the chat
 
 ---
 
@@ -74,7 +75,7 @@ src/
 |-- Controllers/
 |   |-- tracker_controller.py    # Conversation flow: questions, buttons and replies
 |-- Models/
-    |-- streak_model.py          # SQLite database: streak logic and persistence
+    |-- streak_model.py          # Streak logic, stored in the chat's pinned message
 ```
 
 ---
@@ -86,13 +87,13 @@ The bot uses a `ConversationHandler` with two states:
 - `WHO_ARE_YOU` - waiting for the answer to the first question.
 - `MENU` - waiting for the user to pick a menu option.
 
-Streaks are stored in `streaks.db` (SQLite, created automatically on first run) in a `users` table: `user_id`, `username`, `current_streak`, `last_report`. When a day is reported:
+There is no database. Telegram bots cannot read the chat history, but they can read the chat's **pinned message**, so the bot stores each user's streak in a pinned status message like `Streak: 5 (last report: 2026-07-13)` and reads it back with `get_chat`. The data lives inside Telegram itself, so it survives restarts and redeploys - perfect for hosts with an ephemeral filesystem like Render's free plan. When a day is reported:
 
 - Last report was **today** -> already reported, nothing changes.
 - Last report was **yesterday** -> streak + 1.
 - Anything **older** (or a new user) -> streak restarts at 1.
 
-Users are identified by their Telegram user id, so each account has its own independent streak.
+Each private chat has its own pinned message, so each user has their own independent streak.
 
 ---
 
@@ -106,7 +107,7 @@ Users are identified by their Telegram user id, so each account has its own inde
 
 ## Notes
 
-- `streaks.db` is user data and is not committed to the repository.
+- Do not unpin or delete the bot's pinned status message - it IS the storage. If it disappears, the streak starts over.
 - Handlers must be registered **before** `run_polling()` - anything after it never runs.
 
 ---
