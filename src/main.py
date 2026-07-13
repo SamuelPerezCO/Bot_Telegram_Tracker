@@ -1,8 +1,10 @@
 """Entry point of the tracker bot (t.me/Tracker90Bot).
 
-Loads the token from .env and wires the conversation flow before
-starting the polling loop. Streaks are stored in each chat's pinned
-message (see Models.streak_model), so no database is needed.
+Loads the token from .env and wires the conversation flow. On Render
+the bot runs in webhook mode (Telegram pushes updates to us); on a
+local machine it falls back to polling. Streaks are stored in each
+chat's pinned message (see Models.streak_model), so no database is
+needed.
 """
 
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes , MessageHandler , filters , ConversationHandler , CallbackQueryHandler
@@ -27,7 +29,21 @@ conversation = ConversationHandler(
 )
 application.add_handler(conversation)
 
-application.run_polling(allowed_updates=Update.ALL_TYPES)
+# Render sets RENDER_EXTERNAL_URL (the public https address of the service).
+# If it exists we are on Render: run in webhook mode on the port Render gives
+# us. Otherwise we are on a local machine: plain polling.
+WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL")
+if WEBHOOK_URL:
+    application.run_webhook(
+        listen="0.0.0.0" ,
+        port=int(os.getenv("PORT" , "8443")) ,
+        # The token in the path keeps strangers from POSTing fake updates
+        url_path=TOKEN_BOT ,
+        webhook_url=f"{WEBHOOK_URL}/{TOKEN_BOT}" ,
+        allowed_updates=Update.ALL_TYPES ,
+    )
+else:
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 

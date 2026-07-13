@@ -67,6 +67,22 @@ Then in Telegram:
 
 ---
 
+## Deployment (Render)
+
+The bot switches modes automatically: **webhooks** on Render (Telegram pushes updates to the service), **polling** on a local machine. It detects Render through the `RENDER_EXTERNAL_URL` environment variable that Render sets by itself.
+
+Create a **Web Service** on [render.com](https://render.com) pointing to this repository with:
+
+| Setting               | Value                             |
+| --------------------- | --------------------------------- |
+| Build Command         | `pip install -r requirements.txt` |
+| Start Command         | `python src/main.py`              |
+| Environment Variables | `TOKEN_BOT` = your bot token      |
+
+Note for the free plan: the instance spins down after ~15 minutes without traffic, so the first message after a quiet period takes ~30-60 seconds to be answered while the service wakes up. Telegram retries the delivery, so no message is lost.
+
+---
+
 ## Project Structure
 
 ```
@@ -99,9 +115,11 @@ Each private chat has its own pinned message, so each user has their own indepen
 
 ## Configuration
 
-| Variable    | Where  | Description                     |
-| ----------- | ------ | ------------------------------- |
-| `TOKEN_BOT` | `.env` | Bot token given by `@BotFather` |
+| Variable              | Where           | Description                                          |
+| --------------------- | --------------- | ---------------------------------------------------- |
+| `TOKEN_BOT`           | `.env` / Render | Bot token given by `@BotFather`                      |
+| `RENDER_EXTERNAL_URL` | Render (auto)   | Public URL of the service; enables webhook mode      |
+| `PORT`                | Render (auto)   | Port the webhook server listens on (default `8443`)  |
 
 ---
 
