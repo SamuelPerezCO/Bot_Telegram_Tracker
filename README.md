@@ -46,8 +46,8 @@ pip install python-telegram-bot python-dotenv
 3. Create a `.env` file in the project root with your bot token and the chat id of each user:
    ```
    TOKEN_BOT=your_token_from_botfather
-   HI_CHAT_ID=chat_id_of_el_hi
-   TORNILLO_CHAT_ID=chat_id_of_el_tornillo
+   CHAT_1 = CHAT_ID_1
+   CHAT_2 = CHAT_ID_2
    ```
    To get a chat id, send `/id` to the bot - it replies with the number. This only needs to be done once per user.
 
