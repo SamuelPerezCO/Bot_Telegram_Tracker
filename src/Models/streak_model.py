@@ -95,6 +95,26 @@ async def get_streak(bot , chat_id):
     return status[0]
 
 
+async def init_streak(bot , chat_id):
+    """Makes sure the user has a pinned status, creating it at 0 if not.
+
+    Called when the user starts the bot, so the friend can already
+    check this streak (day 0) before any day has been reported.
+
+    Args:
+        bot: The bot instance (context.bot).
+        chat_id (int): Private chat id.
+
+    Returns:
+        int: The current streak (0 when the status was just created).
+    """
+    status = await _read_status(bot , chat_id)
+    if status is not None:
+        return status[0]
+    await _write_status(bot , chat_id , 0 , "none")
+    return 0
+
+
 async def report_day(bot , chat_id):
     """Registers today as a completed day and updates the streak.
 

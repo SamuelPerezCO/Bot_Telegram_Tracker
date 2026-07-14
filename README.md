@@ -12,6 +12,8 @@ Bot: [t.me/Tracker90Bot](https://t.me/Tracker90Bot)
 - Report a completed day (only counts once per day)
 - Streak continues if you reported yesterday, restarts if you missed a day
 - Reset your streak when you lose
+- Check your friend's streak from your own chat
+- Streak starts at 0 as soon as you `/start` the bot, so your friend can check it right away
 - No database: the streak is stored in the chat's pinned message
 - Your current streak is always visible at the top of the chat
 
@@ -41,10 +43,13 @@ pip install python-telegram-bot python-dotenv
    cd Bot_Telegram_Tracker
    ```
 2. Install the dependencies (see above).
-3. Create a `.env` file in the project root with your bot token:
+3. Create a `.env` file in the project root with your bot token and the chat id of each user:
    ```
    TOKEN_BOT=your_token_from_botfather
+   HI_CHAT_ID=chat_id_of_el_hi
+   TORNILLO_CHAT_ID=chat_id_of_el_tornillo
    ```
+   To get a chat id, send `/id` to the bot - it replies with the number. This only needs to be done once per user.
 
 ---
 
@@ -60,10 +65,13 @@ python main.py
 Then in Telegram:
 
 1. Send `/start` to the bot.
-2. Answer the "Who are you?" question - the bot shows your current streak.
+2. Answer the "Who are you?" question - the bot shows your current streak (created at 0 on the first time).
 3. Choose an option:
    - **I want to report a new day** -> adds today to your streak.
    - **I want to report that I lose** -> resets your streak to 0.
+   - **I want to see my friend's streak** -> shows the other user's streak.
+
+Extra command: `/id` replies with your chat id (used once to fill `HI_CHAT_ID` and `TORNILLO_CHAT_ID`).
 
 ---
 
@@ -73,11 +81,11 @@ The bot switches modes automatically: **webhooks** on Render (Telegram pushes up
 
 Create a **Web Service** on [render.com](https://render.com) pointing to this repository with:
 
-| Setting               | Value                             |
-| --------------------- | --------------------------------- |
-| Build Command         | `pip install -r requirements.txt` |
-| Start Command         | `python src/main.py`              |
-| Environment Variables | `TOKEN_BOT` = your bot token      |
+| Setting               | Value                                                          |
+| --------------------- | -------------------------------------------------------------- |
+| Build Command         | `pip install -r requirements.txt`                              |
+| Start Command         | `python src/main.py`                                           |
+| Environment Variables | `TOKEN_BOT`, `HI_CHAT_ID`, `TORNILLO_CHAT_ID` (same as `.env`) |
 
 Note for the free plan: the instance spins down after ~15 minutes without traffic, so the first message after a quiet period takes ~30-60 seconds to be answered while the service wakes up. Telegram retries the delivery, so no message is lost.
 
@@ -111,6 +119,8 @@ There is no database. Telegram bots cannot read the chat history, but they can r
 
 Each private chat has its own pinned message, so each user has their own independent streak.
 
+The friend's streak works the same way: a private chat id equals the user's Telegram id, and the bot can read the pinned message of any chat it knows. With `HI_CHAT_ID` and `TORNILLO_CHAT_ID` configured, the bot reads the *other* user's pinned message to answer "I want to see my friend's streak".
+
 ---
 
 ## Configuration
@@ -118,6 +128,8 @@ Each private chat has its own pinned message, so each user has their own indepen
 | Variable              | Where           | Description                                          |
 | --------------------- | --------------- | ---------------------------------------------------- |
 | `TOKEN_BOT`           | `.env` / Render | Bot token given by `@BotFather`                      |
+| `HI_CHAT_ID`          | `.env` / Render | Private chat id of El Hi (get it with `/id`)         |
+| `TORNILLO_CHAT_ID`    | `.env` / Render | Private chat id of El tornillo (get it with `/id`)   |
 | `RENDER_EXTERNAL_URL` | Render (auto)   | Public URL of the service; enables webhook mode      |
 | `PORT`                | Render (auto)   | Port the webhook server listens on (default `8443`)  |
 

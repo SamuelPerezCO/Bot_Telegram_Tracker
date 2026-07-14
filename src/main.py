@@ -28,16 +28,13 @@ conversation = ConversationHandler(
     fallbacks=[ CommandHandler("start" , tracker_controller.tracker_controller.who_are_you) ],
 )
 application.add_handler(conversation)
+application.add_handler(CommandHandler("id" , tracker_controller.tracker_controller.chat_id))
 
-# Render sets RENDER_EXTERNAL_URL (the public https address of the service).
-# If it exists we are on Render: run in webhook mode on the port Render gives
-# us. Otherwise we are on a local machine: plain polling.
 WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL")
 if WEBHOOK_URL:
     application.run_webhook(
         listen="0.0.0.0" ,
         port=int(os.getenv("PORT" , "8443")) ,
-        # The token in the path keeps strangers from POSTing fake updates
         url_path=TOKEN_BOT ,
         webhook_url=f"{WEBHOOK_URL}/{TOKEN_BOT}" ,
         allowed_updates=Update.ALL_TYPES ,
