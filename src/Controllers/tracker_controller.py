@@ -27,16 +27,34 @@ def _friend_of(chat_id):
         chat_id (int): Chat id of the user asking.
 
     Returns:
-        tuple[int, str] | tuple[None, None]: (friend_chat_id, friend_name),
-        or (None, None) if the ids are not configured.
+        tuple[int, str, str] | tuple[None, None, None]: (friend_chat_id,
+        friend_name, own_name), or (None, None, None) if the ids are
+        not configured.
     """
     hi_id = os.getenv("HI_CHAT_ID")
     tornillo_id = os.getenv("TORNILLO_CHAT_ID")
     if not hi_id or not tornillo_id:
-        return None , None
+        return None , None , None
     if str(chat_id) == hi_id:
-        return int(tornillo_id) , "El tornillo"
-    return int(hi_id) , "El Hi"
+        return int(tornillo_id) , "El tornillo" , "El Hi"
+    return int(hi_id) , "El Hi" , "El tornillo"
+
+
+async def _notify_friend(bot , chat_id , streak):
+    """Tells the friend that this user just reported his day.
+
+    Args:
+        bot: The bot instance (context.bot).
+        chat_id (int): Chat id of the user who reported.
+        streak (int): The streak after the report.
+    """
+    friend_id , _ , own_name = _friend_of(chat_id)
+    if friend_id is None:
+        return
+    try:
+        await bot.send_message(friend_id , f"{own_name} just reported his day! His streak is now {streak} 🔥")
+    except Exception:
+        pass  # the friend has not started the bot yet, nothing to do
 
 class tracker_controller:
     """Handlers for each step of the bot conversation."""
@@ -110,6 +128,7 @@ class tracker_controller:
             streak , counted = await streak_model.report_day(context.bot , chat_id)
             if counted:
                 await update.message.reply_text(f"Day reported! Your streak is now {streak} 🔥" , reply_markup=ReplyKeyboardRemove())
+                await _notify_friend(context.bot , chat_id , streak)
             else:
                 await update.message.reply_text(f"You already reported today. Your streak is {streak} 🔥" , reply_markup=ReplyKeyboardRemove())
             return ConversationHandler.END
@@ -118,7 +137,7 @@ class tracker_controller:
             await update.message.reply_text("Streak reset to 0. Start again tomorrow 💪" , reply_markup=ReplyKeyboardRemove())
             return ConversationHandler.END
         elif update.message.text == "I want to see my friend's streak":
-            friend_id , friend_name = _friend_of(chat_id)
+            friend_id , friend_name , _ = _friend_of(chat_id)
             if friend_id is None:
                 await update.message.reply_text("Friend ids are not configured (set HI_CHAT_ID and TORNILLO_CHAT_ID)" , reply_markup=ReplyKeyboardRemove())
                 return ConversationHandler.END

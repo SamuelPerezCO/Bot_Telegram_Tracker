@@ -6,8 +6,25 @@ bot keeps each user's streak in a pinned status message, so the data
 lives in Telegram, survives restarts/redeploys and needs no database.
 """
 
+import os
 import re
-from datetime import date , timedelta
+from datetime import datetime , timedelta
+from zoneinfo import ZoneInfo
+
+
+def _today():
+    """Current date in the users' timezone, not the server's.
+
+    The server may run in another timezone (Render uses UTC), so there
+    date.today() already flips to the next day during the evening here.
+    The timezone comes from the TIMEZONE environment variable and
+    defaults to America/Bogota.
+
+    Returns:
+        datetime.date: Today's date for the users.
+    """
+    timezone = ZoneInfo(os.getenv("TIMEZONE" , "America/Bogota"))
+    return datetime.now(timezone).date()
 
 
 def _format_status(streak , last_report):
@@ -131,8 +148,8 @@ async def report_day(bot , chat_id):
         tuple[int, bool]: The streak after the report, and whether the
         report counted (False means the user had already reported today).
     """
-    today = date.today().isoformat()
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    today = _today().isoformat()
+    yesterday = (_today() - timedelta(days=1)).isoformat()
 
     status = await _read_status(bot , chat_id)
     if status is None:
