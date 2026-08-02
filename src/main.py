@@ -2,7 +2,7 @@
 
 Runs the bot in polling mode, which is the comfortable way to develop on
 a local machine. In production the bot lives on Vercel as a serverless
-webhook instead (see api/telegram.py), so this file is not used there.
+webhook instead (see api/webhook.py), so this file is not used there.
 
 Telegram does not allow polling and a webhook at the same time. If the
 webhook is already set, remove it first:

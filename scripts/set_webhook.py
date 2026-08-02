@@ -59,7 +59,7 @@ def main():
         print(json.dumps(call(token , "getWebhookInfo") , indent=2))
         return
 
-    url = f"{argument.rstrip('/')}/api/telegram"
+    url = f"{argument.rstrip('/')}/api/webhook"
     params = {"url": url , "allowed_updates": json.dumps(["message"])}
     if secret:
         params["secret_token"] = secret

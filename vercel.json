@@ -1,7 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
-    "api/telegram.py": {
+    "api/webhook.py": {
       "includeFiles": "src/**",
       "maxDuration": 30
     }
