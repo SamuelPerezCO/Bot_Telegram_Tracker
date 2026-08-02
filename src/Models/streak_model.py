@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 def _today():
     """Current date in the users' timezone, not the server's.
 
-    The server may run in another timezone (Render uses UTC), so there
+    The server may run in another timezone (Vercel uses UTC), so there
     date.today() already flips to the next day during the evening here.
     The timezone comes from the TIMEZONE environment variable and
     defaults to America/Bogota.

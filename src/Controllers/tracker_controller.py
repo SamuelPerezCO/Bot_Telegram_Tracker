@@ -3,17 +3,17 @@
 Handlers for each step of the conversation: the /start question, the
 menu, and the streak reports. All persistence is delegated to
 Models.streak_model; this module only talks to the user.
+
+The handlers keep no state between messages: each one is chosen by the
+text of the button the user pressed (see bot.py), because on Vercel
+every update may be served by a different serverless instance.
 """
 
 from telegram import Update , ReplyKeyboardRemove ,InlineKeyboardMarkup , InlineKeyboardButton , KeyboardButton , ReplyKeyboardMarkup
-from telegram.ext import ContextTypes , ConversationHandler , CallbackContext
+from telegram.ext import ContextTypes , CallbackContext
 import os
 
 from Models import streak_model
-
-# Conversation states used by the ConversationHandler in main.py.
-WHO_ARE_YOU = 0
-MENU = 1
 
 
 def _friend_of(chat_id):
@@ -79,16 +79,11 @@ class tracker_controller:
         Args:
             update: Incoming Telegram update.
             context: Handler context provided by python-telegram-bot.
-
-        Returns:
-            int: The WHO_ARE_YOU state, so the next message goes to
-            who_are_you_answer.
         """
         keyboard = ReplyKeyboardMarkup([
             [KeyboardButton("El Hi") , KeyboardButton("El tornillo")]
         ])
         await update.message.reply_text("Who are you?" , reply_markup=keyboard)
-        return WHO_ARE_YOU
 
     @staticmethod
     async def who_are_you_answer(update:Update, context: ContextTypes.DEFAULT_TYPE):
@@ -97,9 +92,6 @@ class tracker_controller:
         Args:
             update: Incoming Telegram update with the user's answer.
             context: Handler context provided by python-telegram-bot.
-
-        Returns:
-            int: The MENU state, so the next message goes to report_new_day.
         """
         keyboard = ReplyKeyboardMarkup([
             [KeyboardButton("I want to report a new day") , KeyboardButton("I want to report that I lose")] ,
@@ -108,7 +100,6 @@ class tracker_controller:
         streak = await streak_model.init_streak(context.bot , update.effective_chat.id)
         await update.message.reply_text(f"Your Current Streak Is {streak} 🔥" , reply_markup=ReplyKeyboardRemove())
         await update.message.reply_text("What do you want to do?" , reply_markup=keyboard)
-        return MENU
 
     @staticmethod
     async def report_new_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -118,10 +109,6 @@ class tracker_controller:
         Args:
             update: Incoming Telegram update with the chosen menu option.
             context: Handler context provided by python-telegram-bot.
-
-        Returns:
-            int: ConversationHandler.END when the report is processed,
-            or MENU again if the message matched no button.
         """
         chat_id = update.effective_chat.id
         if update.message.text == "I want to report a new day":
@@ -131,23 +118,27 @@ class tracker_controller:
                 await _notify_friend(context.bot , chat_id , streak)
             else:
                 await update.message.reply_text(f"You already reported today. Your streak is {streak} 🔥" , reply_markup=ReplyKeyboardRemove())
-            return ConversationHandler.END
         elif update.message.text == "I want to report that I lose":
             await streak_model.reset_streak(context.bot , chat_id)
             await update.message.reply_text("Streak reset to 0. Start again tomorrow 💪" , reply_markup=ReplyKeyboardRemove())
-            return ConversationHandler.END
         elif update.message.text == "I want to see my friend's streak":
             friend_id , friend_name , _ = _friend_of(chat_id)
             if friend_id is None:
                 await update.message.reply_text("Friend ids are not configured (set HI_CHAT_ID and TORNILLO_CHAT_ID)" , reply_markup=ReplyKeyboardRemove())
-                return ConversationHandler.END
+                return
             try:
                 streak = await streak_model.get_streak(context.bot , friend_id)
             except Exception:
                 await update.message.reply_text(f"I could not reach {friend_name}'s chat. Has he started the bot?" , reply_markup=ReplyKeyboardRemove())
-                return ConversationHandler.END
+                return
             await update.message.reply_text(f"{friend_name}'s streak is {streak} 🔥" , reply_markup=ReplyKeyboardRemove())
-            return ConversationHandler.END
-        else:
-            await update.message.reply_text("Please use one of the buttons")
-            return MENU
+
+    @staticmethod
+    async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Answers any text that is not one of the buttons.
+
+        Args:
+            update: Incoming Telegram update.
+            context: Handler context provided by python-telegram-bot.
+        """
+        await update.message.reply_text("Please use one of the buttons, or send /start")
