@@ -1,7 +1,7 @@
 """Builds the bot application: handlers, commands and routing.
 
-Shared by the two entry points: main.py runs it with polling on a local
-machine, api/webhook.py feeds it one update per request on Vercel.
+Shared by the two entry points: run_local.py runs it with polling on a
+local machine, api/webhook.py feeds it one update per request on Vercel.
 
 There is no ConversationHandler on purpose. Vercel is serverless: every
 update can land on a fresh instance, so any state kept in memory (like

@@ -62,7 +62,7 @@ Run the bot:
 
 ```bash
 cd src
-python main.py
+python run_local.py
 ```
 
 Then in Telegram:
@@ -80,7 +80,7 @@ Extra command: `/id` replies with your chat id (used once to fill `HI_CHAT_ID` a
 
 ## Deployment (Vercel)
 
-In production the bot is a **serverless function** on Vercel: there is no process running between messages. Telegram POSTs each update to `/api/webhook`, the function builds the bot, answers that single update and dies. Locally the bot still runs with **polling** (`src/main.py`), which is more comfortable to develop with.
+In production the bot is a **serverless function** on Vercel: there is no process running between messages. Telegram POSTs each update to `/api/webhook`, the function builds the bot, answers that single update and dies. Locally the bot still runs with **polling** (`src/run_local.py`), which is more comfortable to develop with.
 
 1. Push the repository to GitHub and import it on [vercel.com](https://vercel.com) (**Add New -> Project**). No build settings are needed: `vercel.json` already describes the function and `requirements.txt` is installed automatically.
 2. In **Settings -> Environment Variables** add `TOKEN_BOT`, `HI_CHAT_ID`, `TORNILLO_CHAT_ID` and `WEBHOOK_SECRET` (any random string you invent, it just has to match the one in your `.env`).
@@ -110,7 +110,8 @@ scripts/
 |-- set_webhook.py               # Registers/removes the webhook in Telegram
 src/
 |-- bot.py                       # Builds the application and routes every message
-|-- main.py                      # Local entry point: runs the bot with polling
+|-- run_local.py                 # Local entry point: runs the bot with polling
+|                                # (must not be named main.py, see the file)
 |-- Controllers/
 |   |-- tracker_controller.py    # Conversation flow: questions, buttons and replies
 |-- Models/
