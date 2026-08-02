@@ -1,16 +1,21 @@
 """Vercel entry point: one HTTP request = one Telegram update.
 
 Vercel is serverless, so there is no process running between messages:
-Telegram POSTs an update to https://<project>.vercel.app/api/webhook,
-this function builds the bot, processes that single update and dies.
+Telegram POSTs an update to the deployment, this function builds the
+bot, processes that single update and dies.
 
 Register the webhook once with:
 
     python scripts/set_webhook.py https://<project>.vercel.app
 
-This file must NOT be called telegram.py: Vercel puts the directory of
-the function on sys.path, so that name would shadow the python-telegram-bot
-package and `from telegram import ...` would import this file instead.
+Two naming rules, both learned the hard way:
+
+- The file must live in a location Vercel accepts as an entrypoint
+  (api/index.py is one). Anything else fails the build with
+  "No python entrypoint found in default locations".
+- It must NOT be called telegram.py: Vercel puts the directory of the
+  function on sys.path, so that name would shadow python-telegram-bot
+  and `from telegram import ...` would import this file instead.
 """
 
 from http.server import BaseHTTPRequestHandler

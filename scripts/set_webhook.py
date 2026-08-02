@@ -12,6 +12,7 @@ same value must exist in the Vercel environment variables).
 """
 
 from dotenv import load_dotenv
+from urllib.error import HTTPError , URLError
 from urllib.parse import urlencode
 from urllib.request import urlopen
 import json
@@ -20,6 +21,36 @@ import sys
 
 
 API = "https://api.telegram.org/bot{token}/{method}?{params}"
+
+# Where the function may answer, depending on how Vercel decides to route
+# the project. The first one that replies to the health check is used, so
+# a change in Vercel's routing does not silently break the webhook.
+CANDIDATE_PATHS = ("/api/index" , "/api" , "/")
+
+
+def find_endpoint(base):
+    """Finds which URL of the deployment the bot is answering on.
+
+    Args:
+        base (str): Root URL of the deployment, without trailing slash.
+
+    Returns:
+        str | None: The working URL, or None if none of them answered.
+    """
+    for path in CANDIDATE_PATHS:
+        url = base + path
+        try:
+            with urlopen(url , timeout=30) as answer:
+                body = answer.read().decode(errors="replace")
+                if answer.status == 200 and "alive" in body:
+                    print(f"  {url} -> alive")
+                    return url
+                print(f"  {url} -> {answer.status}: {body[:400]}")
+        except HTTPError as error:
+            print(f"  {url} -> {error.code}: {error.read().decode(errors='replace')[:400]}")
+        except URLError as error:
+            print(f"  {url} -> unreachable ({error.reason})")
+    return None
 
 
 def call(token , method , **params):
@@ -59,14 +90,22 @@ def main():
         print(json.dumps(call(token , "getWebhookInfo") , indent=2))
         return
 
-    url = f"{argument.rstrip('/')}/api/webhook"
+    print("Looking for the deployment endpoint...")
+    url = find_endpoint(argument.rstrip("/"))
+    if url is None:
+        sys.exit(
+            "\nNone of the URLs answered the health check, so the webhook was NOT changed"
+            "\n(the bot keeps working wherever it is pointing now)."
+            "\nFix the deployment first: the output above shows what each URL answered."
+        )
+
     params = {"url": url , "allowed_updates": json.dumps(["message"])}
     if secret:
         params["secret_token"] = secret
     else:
         print("Warning: WEBHOOK_SECRET is not set, the webhook URL will accept updates from anyone")
 
-    print(f"Setting webhook to {url}")
+    print(f"\nSetting webhook to {url}")
     print(call(token , "setWebhook" , **params))
 
 

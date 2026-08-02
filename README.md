@@ -80,7 +80,7 @@ Extra command: `/id` replies with your chat id (used once to fill `HI_CHAT_ID` a
 
 ## Deployment (Vercel)
 
-In production the bot is a **serverless function** on Vercel: there is no process running between messages. Telegram POSTs each update to `/api/webhook`, the function builds the bot, answers that single update and dies. Locally the bot still runs with **polling** (`src/run_local.py`), which is more comfortable to develop with.
+In production the bot is a **serverless function** on Vercel: there is no process running between messages. Telegram POSTs each update to the deployment, the function builds the bot, answers that single update and dies. Locally the bot still runs with **polling** (`src/run_local.py`), which is more comfortable to develop with.
 
 1. Push the repository to GitHub and import it on [vercel.com](https://vercel.com) (**Add New -> Project**). No build settings are needed: `vercel.json` already describes the function and `requirements.txt` is installed automatically.
 2. In **Settings -> Environment Variables** add `TOKEN_BOT`, `HI_CHAT_ID`, `TORNILLO_CHAT_ID` and `WEBHOOK_SECRET` (any random string you invent, it just has to match the one in your `.env`).
@@ -92,7 +92,7 @@ In production the bot is a **serverless function** on Vercel: there is no proces
 
    Check it whenever you are in doubt with `python scripts/set_webhook.py info`.
 
-Open `https://your-project.vercel.app/api/webhook` in a browser to confirm the deployment is alive; it answers with a short text.
+Open `https://your-project.vercel.app/api/index` in a browser to confirm the deployment is alive; it answers with a short text. `set_webhook.py` probes that URL by itself and refuses to change anything if the deployment is not answering, so a broken deploy cannot take the bot down.
 
 **Going back to polling on your machine:** Telegram refuses to do both at the same time, so remove the webhook first with `python scripts/set_webhook.py delete`, and set it again when you are done.
 
@@ -104,8 +104,8 @@ Notes on the free plan: functions are billed per invocation and stay well inside
 
 ```
 api/
-|-- webhook.py                   # Vercel entry point: one HTTP request = one update
-|                                # (must not be named telegram.py, see the file)
+|-- index.py                     # Vercel entry point: one HTTP request = one update
+|                                # (the name is constrained by Vercel, see the file)
 scripts/
 |-- set_webhook.py               # Registers/removes the webhook in Telegram
 src/
