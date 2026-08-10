@@ -16,6 +16,38 @@ import os
 from Models import streak_model
 
 
+# Word the user can type to get out of the goals questionnaire, so a
+# half answered setup never leaves the chat stuck.
+CANCEL_WORD = "cancel"
+
+
+def _menu_keyboard():
+    """Builds the keyboard with the actions of the main menu.
+
+    Returns:
+        telegram.ReplyKeyboardMarkup: The menu keyboard.
+    """
+    return ReplyKeyboardMarkup([
+        [KeyboardButton("I want to report a new day") , KeyboardButton("I want to report that I lose")] ,
+        [KeyboardButton("I want to see my friend's streak")] ,
+        [KeyboardButton("I want to add my goals")]
+    ])
+
+
+def _goals_summary(state):
+    """Writes the goals of a user as a readable list.
+
+    Args:
+        state (dict): State as returned by Models.streak_model.
+
+    Returns:
+        str: One line per goal, with the period at the end.
+    """
+    lines = [f"{number}. {goal}" for number , goal in enumerate(state["goals"] , 1)]
+    lines.append(f"\nYou have {state['period_days']} days to complete all of them ⏳")
+    return "\n".join(lines)
+
+
 def _friend_of(chat_id):
     """Finds the chat id and name of the OTHER user (the friend).
 
@@ -93,10 +125,7 @@ class tracker_controller:
             update: Incoming Telegram update with the user's answer.
             context: Handler context provided by python-telegram-bot.
         """
-        keyboard = ReplyKeyboardMarkup([
-            [KeyboardButton("I want to report a new day") , KeyboardButton("I want to report that I lose")] ,
-            [KeyboardButton("I want to see my friend's streak")]
-        ])
+        keyboard = _menu_keyboard()
         streak = await streak_model.init_streak(context.bot , update.effective_chat.id)
         await update.message.reply_text(f"Your Current Streak Is {streak} 🔥" , reply_markup=ReplyKeyboardRemove())
         await update.message.reply_text("What do you want to do?" , reply_markup=keyboard)
@@ -134,11 +163,73 @@ class tracker_controller:
             await update.message.reply_text(f"{friend_name}'s streak is {streak} 🔥" , reply_markup=ReplyKeyboardRemove())
 
     @staticmethod
-    async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Answers any text that is not one of the buttons.
+    async def add_goals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Starts the goals questionnaire: asks how many goals there are.
+
+        From here the user only writes free text, so every answer is
+        handled by free_text below.
 
         Args:
             update: Incoming Telegram update.
             context: Handler context provided by python-telegram-bot.
         """
-        await update.message.reply_text("Please use one of the buttons, or send /start")
+        await streak_model.begin_goal_setup(context.bot , update.effective_chat.id)
+        await update.message.reply_text(
+            f"How many goals do you want to add? (1 to {streak_model.MAX_GOALS})\n"
+            f"Write \"{CANCEL_WORD}\" at any moment to stop." ,
+            reply_markup=ReplyKeyboardRemove()
+        )
+
+    @staticmethod
+    async def free_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Answers any text that is not one of the buttons.
+
+        While the goals questionnaire is running, this text IS the
+        answer to the question the bot asked. Which question that is
+        cannot be remembered in memory (a serverless instance does not
+        survive between two updates), so it is read back from the state
+        stored in the pinned message.
+
+        Args:
+            update: Incoming Telegram update.
+            context: Handler context provided by python-telegram-bot.
+        """
+        chat_id = update.effective_chat.id
+        text = update.message.text.strip()
+        state = await streak_model.get_state(context.bot , chat_id)
+        step = state["setup"]
+
+        if step is None:
+            await update.message.reply_text("Please use one of the buttons, or send /start")
+            return
+
+        if text.lower() == CANCEL_WORD:
+            await streak_model.cancel_goal_setup(context.bot , chat_id)
+            await update.message.reply_text("Ok, I stopped asking for goals." , reply_markup=_menu_keyboard())
+            return
+
+        if step == streak_model.SETUP_COUNT:
+            if not text.isdigit() or not 1 <= int(text) <= streak_model.MAX_GOALS:
+                await update.message.reply_text(f"Please answer with a number between 1 and {streak_model.MAX_GOALS}")
+                return
+            await streak_model.set_goal_count(context.bot , chat_id , int(text))
+            await update.message.reply_text("Tell me goal number 1")
+
+        elif step == streak_model.SETUP_GOAL:
+            state = await streak_model.add_goal(context.bot , chat_id , text)
+            if state["setup"] == streak_model.SETUP_GOAL:
+                await update.message.reply_text(f"Tell me goal number {len(state['goals']) + 1}")
+            else:
+                await update.message.reply_text(
+                    f"I have your {state['goal_count']} goals.\n"
+                    "In how much time do you want to complete all of them?\n"
+                    "For example: 7 days, 2 weeks, 1 month"
+                )
+
+        elif step == streak_model.SETUP_PERIOD:
+            days = streak_model.parse_period(text)
+            if days is None:
+                await update.message.reply_text("I did not understand that period. Try something like: 7 days, 2 weeks, 1 month")
+                return
+            state = await streak_model.set_period(context.bot , chat_id , days)
+            await update.message.reply_text("These are your goals:\n" + _goals_summary(state) , reply_markup=_menu_keyboard())

@@ -99,7 +99,13 @@ def main():
             "\nFix the deployment first: the output above shows what each URL answered."
         )
 
-    params = {"url": url , "allowed_updates": json.dumps(["message"])}
+    # Updates queued while the webhook was pointing somewhere broken are
+    # stale: delivering them would answer messages from hours ago.
+    params = {
+        "url": url ,
+        "allowed_updates": json.dumps(["message"]) ,
+        "drop_pending_updates": "true" ,
+    }
     if secret:
         params["secret_token"] = secret
     else:

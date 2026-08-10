@@ -119,7 +119,10 @@ class handler(BaseHTTPRequestHandler):
             self._reply(500 , f"Missing environment variables: {' , '.join(missing)}")
             return
 
-        self._reply(200 , "Tracker bot webhook is alive")
+        # Only whether it exists, never the value: a secret that does not
+        # match the one used to register the webhook rejects every update.
+        secret_state = "set" if WEBHOOK_SECRET else "not set (updates are not verified)"
+        self._reply(200 , f"Tracker bot webhook is alive\nwebhook secret: {secret_state}")
 
     def _reply(self , status , text):
         """Writes a plain text response.
