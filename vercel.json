@@ -4,6 +4,10 @@
     "api/index.py": {
       "includeFiles": "src/**",
       "maxDuration": 30
+    },
+    "api/remind.py": {
+      "includeFiles": "src/**",
+      "maxDuration": 30
     }
   }
 }

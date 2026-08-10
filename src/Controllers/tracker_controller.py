@@ -27,8 +27,11 @@ YES_ANSWERS = {"yes" , "y" , "si" , "sí" , "yeah" , "yep" , "✅"}
 NO_ANSWERS = {"no" , "n" , "nope" , "nah" , "❌"}
 
 
-def _menu_keyboard():
+def menu_keyboard():
     """Builds the keyboard with the actions of the main menu.
+
+    Public because the daily reminder (api/remind.py) sends it too, so
+    the user can start the report with one tap.
 
     Returns:
         telegram.ReplyKeyboardMarkup: The menu keyboard.
@@ -129,6 +132,69 @@ async def _notify_friend(bot , chat_id , state):
     except Exception:
         pass  # the friend has not started the bot yet, nothing to do
 
+def _configured_users():
+    """Lists the users the bot knows, from the environment.
+
+    Returns:
+        list[tuple[int, str]]: (chat_id, name) of every configured user.
+    """
+    users = []
+    for variable , name in (("HI_CHAT_ID" , "El Hi") , ("TORNILLO_CHAT_ID" , "El tornillo")):
+        chat_id = os.getenv(variable)
+        if chat_id:
+            users.append((int(chat_id) , name))
+    return users
+
+
+async def send_daily_reminders(bot):
+    """Asks every user to report the day, unless they already did.
+
+    Called by the scheduled endpoint (api/remind.py), never by an
+    update: this is the only message the bot sends on its own.
+
+    Args:
+        bot: The bot instance.
+
+    Returns:
+        list[str]: One line per user saying what was done, so the cron
+        log shows why somebody was not written to.
+    """
+    report = []
+    for chat_id , name in _configured_users():
+        try:
+            state = await streak_model.get_state(bot , chat_id)
+        except Exception as error:
+            report.append(f"{name}: could not read the chat ({error!r})")
+            continue
+
+        if not state["goals"]:
+            report.append(f"{name}: skipped, no goals yet")
+            continue
+
+        pending = [
+            (number , goal) for number , goal in enumerate(state["goals"] , 1)
+            if goal["last"] != streak_model.today_iso()
+        ]
+        if not pending:
+            report.append(f"{name}: skipped, already reported today")
+            continue
+
+        denominator = state["period_days"] or "?"
+        lines = [f"{number}. {goal['text']} {streak_model.count_of(goal)}/{denominator}" for number , goal in pending]
+        try:
+            await bot.send_message(
+                chat_id ,
+                "Ready to report your day? ⏰\n\nStill pending:\n" + "\n".join(lines) ,
+                reply_markup=menu_keyboard()
+            )
+        except Exception as error:
+            report.append(f"{name}: could not send the reminder ({error!r})")
+            continue
+        report.append(f"{name}: reminded, {len(pending)} goal(s) pending")
+
+    return report
+
+
 class tracker_controller:
     """Handlers for each step of the bot conversation."""
 
@@ -171,7 +237,7 @@ class tracker_controller:
             await update.message.reply_text("Your goals:\n" + _goals_list(state) , reply_markup=ReplyKeyboardRemove())
         else:
             await update.message.reply_text("You have no goals yet." , reply_markup=ReplyKeyboardRemove())
-        await update.message.reply_text("What do you want to do?" , reply_markup=_menu_keyboard())
+        await update.message.reply_text("What do you want to do?" , reply_markup=menu_keyboard())
 
     @staticmethod
     async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -187,10 +253,10 @@ class tracker_controller:
         if choice == "I want to report my day":
             state = await streak_model.get_state(context.bot , chat_id)
             if not state["goals"]:
-                await update.message.reply_text("You have no goals yet, add them first." , reply_markup=_menu_keyboard())
+                await update.message.reply_text("You have no goals yet, add them first." , reply_markup=menu_keyboard())
                 return
             if streak_model.next_pending(state) is None:
-                await update.message.reply_text("You already reported every goal today.\n\n" + _goals_list(state) , reply_markup=_menu_keyboard())
+                await update.message.reply_text("You already reported every goal today.\n\n" + _goals_list(state) , reply_markup=menu_keyboard())
                 return
             state = await streak_model.begin_report(context.bot , chat_id)
             await _ask_next_goal(update , state)
@@ -198,24 +264,24 @@ class tracker_controller:
         elif choice == "I want to see my goals":
             state = await streak_model.get_state(context.bot , chat_id)
             if not state["goals"]:
-                await update.message.reply_text("You have no goals yet, add them first." , reply_markup=_menu_keyboard())
+                await update.message.reply_text("You have no goals yet, add them first." , reply_markup=menu_keyboard())
                 return
-            await update.message.reply_text("Your goals:\n" + _goals_list(state) , reply_markup=_menu_keyboard())
+            await update.message.reply_text("Your goals:\n" + _goals_list(state) , reply_markup=menu_keyboard())
 
         elif choice == "I want to see my friend's goals":
             friend_id , friend_name , _ = _friend_of(chat_id)
             if friend_id is None:
-                await update.message.reply_text("Friend ids are not configured (set HI_CHAT_ID and TORNILLO_CHAT_ID)" , reply_markup=_menu_keyboard())
+                await update.message.reply_text("Friend ids are not configured (set HI_CHAT_ID and TORNILLO_CHAT_ID)" , reply_markup=menu_keyboard())
                 return
             try:
                 state = await streak_model.get_state(context.bot , friend_id)
             except Exception:
-                await update.message.reply_text(f"I could not reach {friend_name}'s chat. Has he started the bot?" , reply_markup=_menu_keyboard())
+                await update.message.reply_text(f"I could not reach {friend_name}'s chat. Has he started the bot?" , reply_markup=menu_keyboard())
                 return
             if not state["goals"]:
-                await update.message.reply_text(f"{friend_name} has no goals yet." , reply_markup=_menu_keyboard())
+                await update.message.reply_text(f"{friend_name} has no goals yet." , reply_markup=menu_keyboard())
                 return
-            await update.message.reply_text(f"{friend_name}'s goals:\n" + _goals_list(state) , reply_markup=_menu_keyboard())
+            await update.message.reply_text(f"{friend_name}'s goals:\n" + _goals_list(state) , reply_markup=menu_keyboard())
 
         elif choice == "I want to add my goals":
             await streak_model.begin_goal_setup(context.bot , chat_id)
@@ -250,7 +316,7 @@ class tracker_controller:
 
         if text.lower() == CANCEL_WORD:
             await streak_model.cancel_setup(context.bot , chat_id)
-            await update.message.reply_text("Ok, I stopped asking." , reply_markup=_menu_keyboard())
+            await update.message.reply_text("Ok, I stopped asking." , reply_markup=menu_keyboard())
             return
 
         if waiting == streak_model.WAITING_COUNT:
@@ -279,7 +345,7 @@ class tracker_controller:
             state = await streak_model.set_period(context.bot , chat_id , days)
             await update.message.reply_text(
                 f"These are your goals, {days} days each:\n" + _goals_list(state) ,
-                reply_markup=_menu_keyboard()
+                reply_markup=menu_keyboard()
             )
 
         elif waiting == streak_model.WAITING_REPORT:
@@ -298,5 +364,5 @@ class tracker_controller:
             # Every goal gets its own question, one message each.
             if await _ask_next_goal(update , state):
                 return
-            await update.message.reply_text("Day reported!\n\n" + _goals_list(state) , reply_markup=_menu_keyboard())
+            await update.message.reply_text("Day reported!\n\n" + _goals_list(state) , reply_markup=menu_keyboard())
             await _notify_friend(context.bot , chat_id , state)

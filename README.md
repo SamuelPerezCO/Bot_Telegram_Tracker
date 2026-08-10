@@ -14,6 +14,7 @@ Bot: [t.me/Tracker90Bot](https://t.me/Tracker90Bot)
 - Every goal is its own streak, shown as `12/90`: a No sends only that goal back to 0
 - Answering only counts once per day, and an interrupted report continues where it stopped
 - Check your friend's goals from your own chat
+- A daily reminder at the hour you choose, listing the goals still pending
 - No database: everything is stored in the chat's pinned message
 - Your goals and their counters are always visible at the top of the chat
 
@@ -107,6 +108,26 @@ In production the bot is a **serverless function** on Vercel: there is no proces
 
 Open `https://your-project.vercel.app/api/index` in a browser to confirm the deployment is alive; it answers with a short text. `set_webhook.py` probes that URL by itself and refuses to change anything if the deployment is not answering, so a broken deploy cannot take the bot down.
 
+### Daily reminder
+
+The bot cannot wake itself up: between two messages there is no process running. An external scheduler calls `/api/remind`, and that function sends "Ready to report your day?" to whoever still has goals pending, listing them. Anybody who already reported everything is skipped, so it never nags for nothing.
+
+1. Add `CRON_SECRET` (any random string) to the Vercel environment variables and redeploy. Until it exists the endpoint answers `500` and sends nothing, so the reminder is never accidentally open to the internet.
+2. Create a free job on [cron-job.org](https://cron-job.org):
+
+   | Field    | Value                                              |
+   | -------- | -------------------------------------------------- |
+   | URL      | `https://your-project.vercel.app/api/remind`       |
+   | Schedule | Every day at `18:00`                               |
+   | Timezone | `America/Bogota`                                   |
+   | Header   | `X-Cron-Secret: your_cron_secret`                  |
+
+   The secret can also go in the URL as `?key=your_cron_secret` if adding a header is not convenient.
+
+3. Use **Test run** in cron-job.org to check it: the response body says what happened with each user, for example `El Hi: reminded, 2 goal(s) pending` / `El tornillo: skipped, already reported today`.
+
+Any other scheduler works the same way, since it is only an HTTP call. Vercel's own cron jobs can call it too (`"crons": [{"path": "/api/remind", "schedule": "0 23 * * *"}]` in `vercel.json`, UTC), but on the Hobby plan they fire anywhere inside the scheduled hour, which is why the external scheduler is used here.
+
 **Going back to polling on your machine:** Telegram refuses to do both at the same time, so remove the webhook first with `python scripts/set_webhook.py delete`, and set it again when you are done.
 
 Notes on the free plan: functions are billed per invocation and stay well inside the free tier for a two-user bot. A cold start makes the first message after a quiet period take a couple of seconds - much better than the ~30-60s Render's free plan needed to wake up a spun-down instance.
@@ -119,6 +140,7 @@ Notes on the free plan: functions are billed per invocation and stay well inside
 api/
 |-- index.py                     # Vercel entry point: one HTTP request = one update
 |                                # (the name is constrained by Vercel, see the file)
+|-- remind.py                    # Called by the scheduler once a day: sends the reminder
 scripts/
 |-- set_webhook.py               # Registers/removes the webhook in Telegram
 src/
@@ -174,6 +196,7 @@ Each private chat has its own pinned message, so each user has their own indepen
 | `HI_CHAT_ID`       | `.env` / Vercel | Private chat id of El Hi (get it with `/id`)                            |
 | `TORNILLO_CHAT_ID` | `.env` / Vercel | Private chat id of El tornillo (get it with `/id`)                      |
 | `WEBHOOK_SECRET`   | `.env` / Vercel | Random string; Telegram sends it back so nobody can fake updates        |
+| `CRON_SECRET`      | Vercel          | Random string the scheduler sends to `/api/remind`; without it the reminder is disabled |
 | `TIMEZONE`         | `.env` / Vercel | Timezone used to decide what "today" is (default `America/Bogota`)      |
 
 ---

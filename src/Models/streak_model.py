@@ -68,6 +68,15 @@ def _today():
     return datetime.now(timezone).date()
 
 
+def today_iso():
+    """Today's date for the users, as it is written in the status.
+
+    Returns:
+        str: Today in ISO format, comparable with a goal's "last".
+    """
+    return _today().isoformat()
+
+
 def _empty_state():
     """Builds the state of a user who has never used the bot.
 
