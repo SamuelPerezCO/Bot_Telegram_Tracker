@@ -23,11 +23,35 @@ from Models import streak_model
 CANCEL_WORD = "cancel"
 
 # Accepted answers when the bot asks whether a goal was achieved.
+# "Not yet" is for the goals that are simply not done at this hour of
+# the day: it changes nothing, so somebody can confirm one goal in the
+# morning without having to lie about the rest.
 YES_ANSWERS = {"yes" , "y" , "si" , "sí" , "yeah" , "yep" , "✅"}
 NO_ANSWERS = {"no" , "n" , "nope" , "nah" , "❌"}
+LATER_ANSWERS = {"not yet" , "notyet" , "later" , "aun no" , "aún no" , "todavia no" , "todavía no" , "⏳"}
 
 # Answers that mean "this goal does not need a reminder".
 SKIP_ANSWERS = {"no" , "none" , "skip" , "nada" , "-"}
+
+
+def _parse_pairs(value):
+    """Reads a "name:chat_id" list as written in the environment.
+
+    Args:
+        value (str): Something like "El Hi:12345,Samuel:67890".
+
+    Returns:
+        list[tuple[int, str]]: (chat_id, name) of each valid pair.
+    """
+    pairs = []
+    for entry in (value or "").split(","):
+        entry = entry.strip()
+        if not entry or ":" not in entry:
+            continue
+        name , _ , chat_id = entry.rpartition(":")
+        if chat_id.strip().lstrip("-").isdigit():
+            pairs.append((int(chat_id.strip()) , name.strip()))
+    return pairs
 
 
 def configured_users():
@@ -38,21 +62,17 @@ def configured_users():
         USERS=El Hi:12345,El tornillo:67890,Samuel:24680
 
     Adding somebody is only adding a pair there, no code changes. The
-    older HI_CHAT_ID / TORNILLO_CHAT_ID variables still work when USERS
-    is not set, so an existing deployment keeps running until it is.
+    chat listed here is the one holding that person's goals: their
+    other chats point back to it (see extra_chats).
+
+    The older HI_CHAT_ID / TORNILLO_CHAT_ID variables still work when
+    USERS is not set, so an existing deployment keeps running until it
+    is migrated.
 
     Returns:
         list[tuple[int, str]]: (chat_id, name) of every configured user.
     """
-    users = []
-    for entry in os.getenv("USERS" , "").split(","):
-        entry = entry.strip()
-        if not entry or ":" not in entry:
-            continue
-        name , _ , chat_id = entry.rpartition(":")
-        if chat_id.strip().lstrip("-").isdigit():
-            users.append((int(chat_id.strip()) , name.strip()))
-
+    users = _parse_pairs(os.getenv("USERS"))
     if not users:
         for variable , name in (("HI_CHAT_ID" , "El Hi") , ("TORNILLO_CHAT_ID" , "El tornillo")):
             chat_id = os.getenv(variable)
@@ -61,31 +81,89 @@ def configured_users():
     return users
 
 
-def _friends_of(chat_id):
-    """Lists everybody except the user asking.
+def extra_chats():
+    """Lists the other chats of somebody already in USERS.
 
-    Args:
-        chat_id (int): Chat id of the user asking.
+    The same person can use the bot from two phones, which for Telegram
+    are two different chats. They are configured in SEND_REMINDER with
+    the same shape as USERS, repeating the name:
+
+        SEND_REMINDER=El Hi:24680
+
+    Those chats are the same person: they share the goals of the chat
+    in USERS, can report from either side, and all of them receive the
+    reminders and what the others report.
 
     Returns:
-        list[tuple[int, str]]: (chat_id, name) of the other users.
+        list[tuple[int, str]]: (chat_id, name) of every extra chat.
     """
-    return [user for user in configured_users() if user[0] != chat_id]
+    extras = _parse_pairs(os.getenv("SEND_REMINDER"))
+    if not extras and not os.getenv("USERS") and os.getenv("HI_CHAT_ID_2"):
+        extras = [(int(os.getenv("HI_CHAT_ID_2")) , "El Hi")]
+    return extras
 
 
 def _name_of(chat_id):
-    """Name of one user, for the messages sent to the others.
+    """Name of the person writing from a chat, main one or extra.
 
     Args:
         chat_id (int): Chat id to look up.
 
     Returns:
-        str: The configured name, or "Somebody" when it is unknown.
+        str | None: The configured name, or None when the chat belongs
+        to nobody known.
     """
-    for user_id , name in configured_users():
-        if user_id == chat_id:
+    for known_id , name in configured_users() + extra_chats():
+        if known_id == chat_id:
             return name
-    return "Somebody"
+    return None
+
+
+def home_chat(chat_id):
+    """Finds the chat holding the goals of whoever writes from here.
+
+    Everything is stored in the pinned message of one chat per person,
+    so a message coming from a second phone has to read and write that
+    same chat instead of starting a second, separate set of goals.
+
+    Args:
+        chat_id (int): Chat the message came from.
+
+    Returns:
+        int: Chat id where that person's goals live. The chat itself
+        when it belongs to nobody configured.
+    """
+    name = _name_of(chat_id)
+    if name is not None:
+        for user_id , user_name in configured_users():
+            if user_name == name:
+                return user_id
+    return chat_id
+
+
+def chats_of(name):
+    """Every chat of one person: the main one and the extras.
+
+    Args:
+        name (str): Configured name of the person.
+
+    Returns:
+        list[int]: Chat ids to write to when telling them something.
+    """
+    return [chat_id for chat_id , other in configured_users() + extra_chats() if other == name]
+
+
+def _friends_of(chat_id):
+    """Lists everybody except the person asking.
+
+    Args:
+        chat_id (int): Chat id of the person asking.
+
+    Returns:
+        list[tuple[int, str]]: (home chat id, name) of the others.
+    """
+    me = _name_of(chat_id)
+    return [(user_id , name) for user_id , name in configured_users() if name != me]
 
 
 def menu_keyboard():
@@ -104,13 +182,17 @@ def menu_keyboard():
     ])
 
 
-def _yes_no_keyboard():
+def _answer_keyboard():
     """Builds the keyboard used while reporting the day.
 
     Returns:
-        telegram.ReplyKeyboardMarkup: A keyboard with Yes and No.
+        telegram.ReplyKeyboardMarkup: A keyboard with Yes, No and
+        Not yet.
     """
-    return ReplyKeyboardMarkup([[KeyboardButton("Yes") , KeyboardButton("No")]] , resize_keyboard=True)
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("Yes") , KeyboardButton("No") , KeyboardButton("Not yet")]] ,
+        resize_keyboard=True
+    )
 
 
 def _goals_list(state):
@@ -142,32 +224,51 @@ async def _ask_next_goal(update , state):
         bool: True if a question was asked, False when every goal was
         already answered today.
     """
-    index = streak_model.next_pending(state)
+    index = streak_model.next_to_ask(state)
     if index is None:
         return False
 
     goal = state["goals"][index]
     await update.message.reply_text(
         f"Did you achieve it today?\n\n{index + 1}. {goal['text']} ({streak_model.count_of(goal)}/{state['period_days'] or '?'})" ,
-        reply_markup=_yes_no_keyboard()
+        reply_markup=_answer_keyboard()
     )
     return True
 
 
+async def _send_to_person(bot , name , text , reply_markup=None):
+    """Writes to every chat of one person.
+
+    Args:
+        bot: The bot instance.
+        name (str): Configured name of the person.
+        text (str): Message to send.
+        reply_markup: Keyboard to attach, if any.
+
+    Returns:
+        int: How many chats received the message.
+    """
+    delivered = 0
+    for chat_id in chats_of(name):
+        try:
+            await bot.send_message(chat_id , text , reply_markup=reply_markup)
+            delivered += 1
+        except Exception:
+            pass  # that chat has not started the bot yet, nothing to do
+    return delivered
+
+
 async def _notify_friends(bot , chat_id , state):
-    """Tells everybody else that this user just reported the day.
+    """Tells everybody else that this person just reported the day.
 
     Args:
         bot: The bot instance (context.bot).
-        chat_id (int): Chat id of the user who reported.
-        state (dict): State of the user after the report.
+        chat_id (int): Chat id of the person who reported.
+        state (dict): State of the person after the report.
     """
-    own_name = _name_of(chat_id)
-    for friend_id , _ in _friends_of(chat_id):
-        try:
-            await bot.send_message(friend_id , f"{own_name} just reported the day!\n\n{_goals_list(state)}")
-        except Exception:
-            pass  # that friend has not started the bot yet, nothing to do
+    own_name = _name_of(chat_id) or "Somebody"
+    for _ , friend_name in _friends_of(chat_id):
+        await _send_to_person(bot , friend_name , f"{own_name} just reported the day!\n\n{_goals_list(state)}")
 
 
 async def send_due_reminders(bot):
@@ -201,12 +302,12 @@ async def send_due_reminders(bot):
                 f"⏰ {goal['time']} - {goal['text']}\n"
                 f"{streak_model.count_of(goal)}/{state['period_days'] or '?'} so far. Is it done?"
             )
-            try:
-                await bot.send_message(chat_id , text , reply_markup=menu_keyboard())
-            except Exception as error:
-                report.append(f"{name}: could not send the reminder of goal {number} ({error!r})")
-                continue
-            sent.append(number)
+            # Every chat of that person, so the reminder arrives on
+            # both phones.
+            if await _send_to_person(bot , name , text , menu_keyboard()):
+                sent.append(number)
+            else:
+                report.append(f"{name}: could not send the reminder of goal {number}")
 
         if sent:
             # Written down only after the message left, so a failure is
@@ -252,14 +353,13 @@ async def send_daily_reminders(bot):
 
         denominator = state["period_days"] or "?"
         lines = [f"{number}. {goal['text']} {streak_model.count_of(goal)}/{denominator}" for number , goal in pending]
-        try:
-            await bot.send_message(
-                chat_id ,
-                "Ready to report your day? ⏰\n\nStill pending:\n" + "\n".join(lines) ,
-                reply_markup=menu_keyboard()
-            )
-        except Exception as error:
-            report.append(f"{name}: could not send the reminder ({error!r})")
+        delivered = await _send_to_person(
+            bot , name ,
+            "Ready to report your day? ⏰\n\nStill pending:\n" + "\n".join(lines) ,
+            menu_keyboard()
+        )
+        if not delivered:
+            report.append(f"{name}: could not send the summary")
             continue
         report.append(f"{name}: reminded, {len(pending)} goal(s) pending")
 
@@ -308,7 +408,7 @@ class tracker_controller:
             update: Incoming Telegram update with the user's answer.
             context: Handler context provided by python-telegram-bot.
         """
-        state = await streak_model.init_state(context.bot , update.effective_chat.id)
+        state = await streak_model.init_state(context.bot , home_chat(update.effective_chat.id))
         if state["goals"]:
             await update.message.reply_text("Your goals:\n" + _goals_list(state) , reply_markup=ReplyKeyboardRemove())
         else:
@@ -323,7 +423,9 @@ class tracker_controller:
             update: Incoming Telegram update with the chosen menu option.
             context: Handler context provided by python-telegram-bot.
         """
-        chat_id = update.effective_chat.id
+        # The goals live in one chat per person, so a message coming
+        # from that person's second phone works on the same ones.
+        chat_id = home_chat(update.effective_chat.id)
         choice = update.message.text
 
         if choice == "I want to report my day":
@@ -331,7 +433,9 @@ class tracker_controller:
             if not state["goals"]:
                 await update.message.reply_text("You have no goals yet, add them first." , reply_markup=menu_keyboard())
                 return
-            if streak_model.next_pending(state) is None:
+            # next_unanswered and not next_to_ask: a goal left for
+            # later is still pending, so asking again has to work.
+            if streak_model.next_unanswered(state) is None:
                 await update.message.reply_text("You already reported every goal today.\n\n" + _goals_list(state) , reply_markup=menu_keyboard())
                 return
             state = await streak_model.begin_report(context.bot , chat_id)
@@ -384,7 +488,7 @@ class tracker_controller:
             update: Incoming Telegram update.
             context: Handler context provided by python-telegram-bot.
         """
-        chat_id = update.effective_chat.id
+        chat_id = home_chat(update.effective_chat.id)
         text = update.message.text.strip()
         state = await streak_model.get_state(context.bot , chat_id)
         waiting = state["waiting"]
@@ -445,20 +549,44 @@ class tracker_controller:
             )
 
         elif waiting == streak_model.WAITING_REPORT:
-            answer = text.lower()
-            if answer not in YES_ANSWERS and answer not in NO_ANSWERS:
-                await update.message.reply_text("Please answer Yes or No" , reply_markup=_yes_no_keyboard())
+            written = text.lower()
+            if written in YES_ANSWERS:
+                answer = streak_model.ANSWER_YES
+            elif written in NO_ANSWERS:
+                answer = streak_model.ANSWER_NO
+            elif written in LATER_ANSWERS:
+                answer = streak_model.ANSWER_LATER
+            else:
+                await update.message.reply_text("Please answer Yes, No or Not yet" , reply_markup=_answer_keyboard())
                 return
 
-            state , goal = await streak_model.answer_goal(context.bot , chat_id , answer in YES_ANSWERS)
+            state , goal = await streak_model.answer_goal(context.bot , chat_id , answer)
             if goal is not None:
-                if answer in YES_ANSWERS:
+                if answer == streak_model.ANSWER_YES:
                     await update.message.reply_text(f"{goal['text']}: {streak_model.count_of(goal)}/{state['period_days'] or '?'} 🔥")
-                else:
+                elif answer == streak_model.ANSWER_NO:
                     await update.message.reply_text(f"{goal['text']}: back to 0. Tomorrow is a new day 💪")
+                else:
+                    await update.message.reply_text(f"{goal['text']}: left for later ⏳")
 
             # Every goal gets its own question, one message each.
             if await _ask_next_goal(update , state):
                 return
-            await update.message.reply_text("Day reported!\n\n" + _goals_list(state) , reply_markup=menu_keyboard())
-            await _notify_friends(context.bot , chat_id , state)
+
+            # Whatever was left for later is still waiting for an
+            # answer, so the report is only "done" for the rest.
+            left = [
+                f"{number}. {goal['text']}" for number , goal in enumerate(state["goals"] , 1)
+                if goal["last"] != streak_model.today_iso()
+            ]
+            answered = len(state["goals"]) - len(left)
+            summary = "Day reported!\n\n" if answered else "Nothing confirmed yet.\n\n"
+            summary += _goals_list(state)
+            if left:
+                summary += "\n\nStill to confirm today:\n" + "\n".join(left)
+            await update.message.reply_text(summary , reply_markup=menu_keyboard())
+
+            # Nothing to tell the others when everything was left for
+            # later: there is no news yet.
+            if answered:
+                await _notify_friends(context.bot , chat_id , state)

@@ -129,7 +129,9 @@ class handler(BaseHTTPRequestHandler):
         # Only whether it exists, never the value: a secret that does not
         # match the one used to register the webhook rejects every update.
         secret_state = "set" if WEBHOOK_SECRET else "not set (updates are not verified)"
-        people = " , ".join(name for _ , name in users)
+        people = " , ".join(
+            f"{name} ({len(tracker_controller.chats_of(name))} chat(s))" for _ , name in users
+        )
         self._reply(200 , f"Tracker bot webhook is alive\nwebhook secret: {secret_state}\nusers: {people}")
 
     def _reply(self , status , text):

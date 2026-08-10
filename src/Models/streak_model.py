@@ -25,6 +25,11 @@ for, because nothing can be kept in memory between two updates on a
 serverless host:
 
     🎯 Goals (5, period: pending) [waiting: goal]
+
+While reporting, the goals answered "not yet" are listed as well, so
+the bot stops asking about them until the next report:
+
+    🎯 Goals (5, period: 90 days) [waiting: report] [later: 2,3]
 """
 
 import os
@@ -57,10 +62,15 @@ WAITING_REPORT = "report"
 # is left alone instead of arriving in the middle of the night.
 CATCH_UP_MINUTES = 60
 
+# The three answers a goal can get while reporting.
+ANSWER_YES = "yes"
+ANSWER_NO = "no"
+ANSWER_LATER = "later"
+
 # How many days each unit is worth when the user writes "2 weeks".
 _PERIOD_UNITS = {"day": 1 , "days": 1 , "week": 7 , "weeks": 7 , "month": 30 , "months": 30}
 
-_HEADER_PATTERN = re.compile(r"Goals \((\d+), period: ([^)]+)\)(?: \[waiting: (\w+)\])?")
+_HEADER_PATTERN = re.compile(r"Goals \((\d+), period: ([^)]+)\)(?: \[waiting: (\w+)\])?(?: \[later: ([\d,]+)\])?")
 # The reminder part is optional so the goals written before this
 # feature existed are still read correctly.
 _GOAL_PATTERN = re.compile(
@@ -119,7 +129,7 @@ def _empty_state():
     Returns:
         dict: A state with no goals.
     """
-    return {"goal_count": 0 , "period_days": None , "waiting": None , "goals": []}
+    return {"goal_count": 0 , "period_days": None , "waiting": None , "later": [] , "goals": []}
 
 
 def _new_goal(text):
@@ -206,8 +216,8 @@ def is_complete(goal , period_days):
     return bool(period_days) and count_of(goal) >= period_days
 
 
-def next_pending(state):
-    """Finds the goal the bot still has to ask about today.
+def next_unanswered(state):
+    """Finds a goal with no answer for today, "not yet" included.
 
     Goals already answered today are skipped, so an interrupted report
     continues where it stopped instead of asking everything again.
@@ -216,12 +226,33 @@ def next_pending(state):
         state (dict): The state of the user.
 
     Returns:
-        int | None: Index of the next goal to ask about, or None when
-        every goal has an answer for today.
+        int | None: Index of the goal, or None when every goal was
+        answered today.
     """
     today = _today().isoformat()
     for index , goal in enumerate(state["goals"]):
         if goal["last"] != today:
+            return index
+    return None
+
+
+def next_to_ask(state):
+    """Finds the goal to ask about right now, during a report.
+
+    Same as next_unanswered, except that the goals answered "not yet"
+    are left out: the user asked to be questioned about them later, so
+    they are only brought back the next time a report is started.
+
+    Args:
+        state (dict): The state of the user.
+
+    Returns:
+        int | None: Index of the goal, or None when there is nothing
+        left to ask in this report.
+    """
+    today = _today().isoformat()
+    for index , goal in enumerate(state["goals"]):
+        if goal["last"] != today and (index + 1) not in state["later"]:
             return index
     return None
 
@@ -295,6 +326,8 @@ def _format_status(state):
     header = f"🎯 Goals ({state['goal_count']}, period: {period})"
     if state["waiting"]:
         header += f" [waiting: {state['waiting']}]"
+    if state["later"]:
+        header += f" [later: {','.join(str(number) for number in state['later'])}]"
 
     lines = [header]
     denominator = state["period_days"] or "?"
@@ -325,6 +358,7 @@ def _parse_status(text):
     period = header.group(2)
     state["period_days"] = int(period.split()[0]) if period != "pending" else None
     state["waiting"] = header.group(3)
+    state["later"] = [int(number) for number in (header.group(4) or "").split(",") if number]
     state["goals"] = [
         {"text": goal_text , "count": int(count) , "last": last , "time": time or "none" , "sent": sent or "none"}
         for goal_text , count , last , time , sent in _GOAL_PATTERN.findall(text)
@@ -563,21 +597,24 @@ async def begin_report(bot , chat_id):
     if state is None:
         state = _empty_state()
     state["waiting"] = WAITING_REPORT
+    state["later"] = []  # a new report asks again about everything pending
     await _write_state(bot , chat_id , state , pinned)
     return state
 
 
-async def answer_goal(bot , chat_id , achieved):
+async def answer_goal(bot , chat_id , answer):
     """Answers the goal the bot is currently asking about.
 
     A goal achieved today continues its streak (+1 when it was also
     achieved yesterday, 1 otherwise). A goal missed today goes back to
-    0: every goal is its own streak.
+    0: every goal is its own streak. A goal answered "not yet" is not
+    touched at all - the day is not over, so the bot only stops asking
+    about it until the next report.
 
     Args:
         bot: The bot instance (context.bot).
         chat_id (int): Private chat id.
-        achieved (bool): The user's answer for that goal.
+        answer (str): ANSWER_YES, ANSWER_NO or ANSWER_LATER.
 
     Returns:
         tuple[dict, dict | None]: The state after the change, and the
@@ -588,22 +625,29 @@ async def answer_goal(bot , chat_id , achieved):
     if state is None:
         return _empty_state() , None
 
-    index = next_pending(state)
+    index = next_to_ask(state)
     if index is None:
         return state , None
 
     goal = state["goals"][index]
-    if achieved:
-        # count_of() is 0 unless the streak is still alive, so this is
-        # "+1" after a good day and "restart at 1" after a broken one.
-        goal["count"] = count_of(goal) + 1
-        if state["period_days"]:
-            goal["count"] = min(goal["count"] , state["period_days"])
+    if answer == ANSWER_LATER:
+        state["later"].append(index + 1)
     else:
-        goal["count"] = 0
-    goal["last"] = _today().isoformat()
+        if answer == ANSWER_YES:
+            # count_of() is 0 unless the streak is still alive, so this
+            # is "+1" after a good day and "restart at 1" after a
+            # broken one.
+            goal["count"] = count_of(goal) + 1
+            if state["period_days"]:
+                goal["count"] = min(goal["count"] , state["period_days"])
+        else:
+            goal["count"] = 0
+        goal["last"] = _today().isoformat()
 
-    if next_pending(state) is None:
+    if next_to_ask(state) is None:
         state["waiting"] = None
+    # "later" is deliberately NOT cleared here: the caller still has to
+    # see which goals were left aside to close the report properly.
+    # begin_report clears it, so the next report asks about them again.
     await _write_state(bot , chat_id , state , pinned)
     return state , goal

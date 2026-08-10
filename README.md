@@ -11,10 +11,12 @@ Bot: [t.me/Tracker90Bot](https://t.me/Tracker90Bot)
 - Write your own goals: the bot asks how many, then asks for them one by one
 - An hour per goal: the bot reminds you about `Wake up at 5:00` at 05:00 and about `Journal` at 22:00
 - Choose the period you give yourself to complete them (`90 days`, `2 weeks`, `3 months`)
-- Daily report goal by goal: one question per goal, Yes or No
+- Daily report goal by goal: one question per goal, **Yes**, **No** or **Not yet**
+- "Not yet" changes nothing and asks again later, so you can confirm the morning goals in the morning
 - Every goal is its own streak, shown as `12/90`: a No sends only that goal back to 0
 - Answering only counts once per day, and an interrupted report continues where it stopped
 - Any number of people: check everybody else's goals from your own chat, and they see when you report
+- Two phones, one person: a second chat shares the same goals and receives the same reminders
 - A daily summary of what is still pending, at the hour you choose
 - No database: everything is stored in the chat's pinned message
 - Your goals and their counters are always visible at the top of the chat
@@ -55,6 +57,12 @@ pip install python-telegram-bot python-dotenv
 
    The older `HI_CHAT_ID` / `TORNILLO_CHAT_ID` variables still work when `USERS` is not set, so an existing deployment keeps running until it is migrated.
 
+4. If somebody uses the bot from **two phones** (two Telegram accounts, so two chats for Telegram), add the second chat with the same name:
+   ```
+   SEND_REMINDER=El Hi:33333333
+   ```
+   That chat becomes the same person: it shares the goals of the chat in `USERS`, can report from either side, and both chats receive every reminder and every notification. The goals themselves stay in **one** pinned message, the one of the chat listed in `USERS` - which is the chat where the status messages keep appearing.
+
    `WEBHOOK_SECRET` is only needed to deploy: it is sent to Telegram when registering the webhook and returned in every update, so the public URL rejects anything that does not come from Telegram. The same value goes in the Vercel environment variables.
 
 ---
@@ -74,7 +82,7 @@ Then in Telegram:
 2. Answer the "Who are you?" question - the bot shows your goals and the menu.
 3. Choose an option:
    - **I want to add my goals** -> the bot asks how many goals you want, then for each one asks the goal and **at what time you want its reminder**, and finally the period you give yourself to complete them.
-   - **I want to report my day** -> the bot asks about every goal, one message each: answer **Yes** to add a day to that goal, **No** to send it back to 0.
+   - **I want to report my day** -> the bot asks about every goal, one message each: answer **Yes** to add a day to that goal, **No** to send it back to 0, **Not yet** when the day is not over and you do not know yet.
    - **I want to see my goals** -> shows your goals with their counters.
    - **I want to see my friends' goals** -> shows everybody else's goals.
 
@@ -199,11 +207,16 @@ Each goal is its own streak, with its own last answer. When a goal is reported:
 - Answered **yes** and it was also achieved **yesterday** -> counter + 1.
 - Answered **yes** after a break (or for the first time) -> counter restarts at 1.
 - Answered **no** -> counter back to 0. The other goals are not touched.
+- Answered **not yet** -> nothing changes at all. The goal is only put aside for the rest of this report, and comes back the next time you report.
 - Already answered **today** -> the bot does not ask about it again.
 
 The last rule is also what makes an interrupted report resume by itself: the next question is simply the first goal that has no answer for today.
 
-Each private chat has its own pinned message, so each user has their own independent goals. The friends' goals work the same way: a private chat id equals the user's Telegram id, and the bot can read the pinned message of any chat it knows. To answer "I want to see my friends' goals" the bot simply reads the pinned message of every *other* chat id in `USERS` - which is why adding a third (or tenth) person is a configuration change and nothing else.
+"Not yet" is what makes a report at 06:00 useful: confirm `Wake up at 5:00`, leave the rest for later, and report again in the evening - only the goals still without an answer are asked. The numbers put aside are the `[later: 2,3]` of the header, and they are forgotten as soon as a new report starts. A goal left for later still gets its own reminder at its hour, and still appears in the daily summary as pending.
+
+Each private chat has its own pinned message, so each person has their own independent goals. When somebody uses two chats (`SEND_REMINDER`), only the chat listed in `USERS` holds the pinned message: every update coming from the second chat is answered where it was written, but read and written against that one status. That is the whole trick - one source of truth, two doors into it.
+
+The friends' goals work the same way: a private chat id equals the user's Telegram id, and the bot can read the pinned message of any chat it knows. To answer "I want to see my friends' goals" the bot simply reads the pinned message of every *other* chat id in `USERS` - which is why adding a third (or tenth) person is a configuration change and nothing else.
 
 ---
 
@@ -213,6 +226,7 @@ Each private chat has its own pinned message, so each user has their own indepen
 | ------------------ | --------------- | ----------------------------------------------------------------------- |
 | `TOKEN_BOT`        | `.env` / Vercel | Bot token given by `@BotFather`                                         |
 | `USERS`            | `.env` / Vercel | The people using the bot, as `name:chat_id` separated by commas (get each id with `/id`) |
+| `SEND_REMINDER`    | `.env` / Vercel | Extra chats of somebody already in `USERS`, same `name:chat_id` shape; they share that person's goals and get the reminders |
 | `WEBHOOK_SECRET`   | `.env` / Vercel | Random string; Telegram sends it back so nobody can fake updates        |
 | `CRON_SECRET`      | Vercel          | Random string the scheduler sends to `/api/remind`; without it the reminders are disabled |
 | `DAILY_REMINDER`   | `.env` / Vercel | Hour of the "what is still pending" summary (default `18:00`, `off` to disable) |
