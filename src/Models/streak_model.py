@@ -1,22 +1,26 @@
-"""Streak and goals storage inside Telegram itself (no database).
+"""Goals storage inside Telegram itself (no database).
 
 Telegram bots cannot read the chat history, but they CAN read the
 chat's pinned message through get_chat. This module uses that: the
 bot keeps each user's state in a pinned status message, so the data
 lives in Telegram, survives restarts/redeploys and needs no database.
 
-The pinned message looks like this once everything is filled in:
+Every goal is its own streak: it counts the days in a row it has been
+achieved, out of the period the user asked for. Answering "no" for a
+goal sends only that goal back to 0, the others keep their count.
 
-    🔥 Streak: 3 (last report: 2026-08-09)
-    🎯 Goals (2, period: 7 days)
-    1. Read one chapter
-    2. Go to the gym
+The pinned message looks like this:
 
-While the user is still answering the goals questions, the header also
-carries the step the bot is waiting for, because nothing can be kept in
-memory between two updates on a serverless host:
+    🎯 Goals (5, period: 90 days)
+    1. Wake Up at 5:00 am 12/90 (last: 2026-08-09)
+    2. Journal 12/90 (last: 2026-08-09)
+    3. No FAP 0/90 (last: 2026-08-09)
 
-    🎯 Goals (4, period: pending) [setup: goal]
+While the bot is waiting for an answer it also writes what it asked
+for, because nothing can be kept in memory between two updates on a
+serverless host:
+
+    🎯 Goals (5, period: pending) [waiting: goal]
 """
 
 import os
@@ -30,21 +34,22 @@ from zoneinfo import ZoneInfo
 MAX_GOALS = 10
 MAX_GOAL_LENGTH = 200
 
-# Steps of the goals questionnaire, stored in the pinned message:
-#   "count"  -> waiting for how many goals the user wants
-#   "goal"   -> waiting for the text of the next goal
-#   "period" -> waiting for the time to complete all of them
+# What the bot is waiting for, stored in the pinned message:
+#   "count"  -> how many goals the user wants
+#   "goal"   -> the text of the next goal
+#   "period" -> the time to complete all of them
+#   "report" -> whether the next goal was achieved today
 #   None     -> nothing pending, the user is in the normal menu
-SETUP_COUNT = "count"
-SETUP_GOAL = "goal"
-SETUP_PERIOD = "period"
+WAITING_COUNT = "count"
+WAITING_GOAL = "goal"
+WAITING_PERIOD = "period"
+WAITING_REPORT = "report"
 
 # How many days each unit is worth when the user writes "2 weeks".
 _PERIOD_UNITS = {"day": 1 , "days": 1 , "week": 7 , "weeks": 7 , "month": 30 , "months": 30}
 
-_STREAK_PATTERN = re.compile(r"Streak: (\d+) \(last report: (\S+)\)")
-_GOALS_PATTERN = re.compile(r"Goals \((\d+), period: ([^)]+)\)(?: \[setup: (\w+)\])?")
-_GOAL_LINE_PATTERN = re.compile(r"^\d+\. (.+)$" , re.MULTILINE)
+_HEADER_PATTERN = re.compile(r"Goals \((\d+), period: ([^)]+)\)(?: \[waiting: (\w+)\])?")
+_GOAL_PATTERN = re.compile(r"^\d+\. (.+?) (\d+)/(?:\d+|\?) \(last: (\S+)\)$" , re.MULTILINE)
 _PERIOD_PATTERN = re.compile(r"^(\d+)\s*([a-z]+)?$" , re.IGNORECASE)
 
 
@@ -67,23 +72,82 @@ def _empty_state():
     """Builds the state of a user who has never used the bot.
 
     Returns:
-        dict: A state with an empty streak and no goals.
+        dict: A state with no goals.
     """
-    return {
-        "streak": 0 ,
-        "last_report": "none" ,
-        "goal_count": 0 ,
-        "goals": [] ,
-        "period_days": None ,
-        "setup": None ,
-    }
+    return {"goal_count": 0 , "period_days": None , "waiting": None , "goals": []}
+
+
+def _new_goal(text):
+    """Builds a goal that has never been reported.
+
+    Args:
+        text (str): The goal as the user wrote it.
+
+    Returns:
+        dict: The goal, with its counter at 0.
+    """
+    # Everything is stored in one message, so a goal has to stay on a
+    # single line and cannot be longer than the status message allows.
+    return {"text": " ".join(text.split())[:MAX_GOAL_LENGTH] , "count": 0 , "last": "none"}
+
+
+def count_of(goal):
+    """Current streak of one goal, in days.
+
+    The stored number is only worth something while the streak is
+    alive: if the last answer is older than yesterday the user stopped
+    reporting and the streak is already broken, so it counts as 0.
+
+    Args:
+        goal (dict): One goal of the state.
+
+    Returns:
+        int: The days in a row this goal has been achieved.
+    """
+    today = _today()
+    if goal["last"] in (today.isoformat() , (today - timedelta(days=1)).isoformat()):
+        return goal["count"]
+    return 0
+
+
+def is_complete(goal , period_days):
+    """Says whether a goal already reached the period asked for.
+
+    Args:
+        goal (dict): One goal of the state.
+        period_days (int | None): The period of the state.
+
+    Returns:
+        bool: True when the goal is finished.
+    """
+    return bool(period_days) and count_of(goal) >= period_days
+
+
+def next_pending(state):
+    """Finds the goal the bot still has to ask about today.
+
+    Goals already answered today are skipped, so an interrupted report
+    continues where it stopped instead of asking everything again.
+
+    Args:
+        state (dict): The state of the user.
+
+    Returns:
+        int | None: Index of the next goal to ask about, or None when
+        every goal has an answer for today.
+    """
+    today = _today().isoformat()
+    for index , goal in enumerate(state["goals"]):
+        if goal["last"] != today:
+            return index
+    return None
 
 
 def parse_period(text):
     """Reads a period of time written by the user.
 
-    Accepts a plain number of days ("7") or a number with a unit
-    ("7 days", "2 weeks", "1 month").
+    Accepts a plain number of days ("90") or a number with a unit
+    ("90 days", "2 weeks", "3 months").
 
     Args:
         text (str): What the user typed.
@@ -114,18 +178,15 @@ def _format_status(state):
     Returns:
         str: The status message text.
     """
-    lines = [f"🔥 Streak: {state['streak']} (last report: {state['last_report']})"]
+    period = f"{state['period_days']} days" if state["period_days"] else "pending"
+    header = f"🎯 Goals ({state['goal_count']}, period: {period})"
+    if state["waiting"]:
+        header += f" [waiting: {state['waiting']}]"
 
-    # The goals block is only written once the user has started adding
-    # goals, so an untouched status stays as short as it used to be.
-    if state["goal_count"] or state["goals"] or state["setup"]:
-        period = f"{state['period_days']} days" if state["period_days"] else "pending"
-        header = f"🎯 Goals ({state['goal_count']}, period: {period})"
-        if state["setup"]:
-            header += f" [setup: {state['setup']}]"
-        lines.append(header)
-        lines.extend(f"{number}. {goal}" for number , goal in enumerate(state["goals"] , 1))
-
+    lines = [header]
+    denominator = state["period_days"] or "?"
+    for number , goal in enumerate(state["goals"] , 1):
+        lines.append(f"{number}. {goal['text']} {goal['count']}/{denominator} (last: {goal['last']})")
     return "\n".join(lines)
 
 
@@ -139,23 +200,19 @@ def _parse_status(text):
         dict | None: The stored state if the text is a status message
         written by the bot, otherwise None.
     """
-    text = text or ""
-    streak = _STREAK_PATTERN.search(text)
-    if streak is None:
+    header = _HEADER_PATTERN.search(text or "")
+    if header is None:
         return None
 
     state = _empty_state()
-    state["streak"] = int(streak.group(1))
-    state["last_report"] = streak.group(2)
-
-    goals = _GOALS_PATTERN.search(text)
-    if goals is not None:
-        state["goal_count"] = int(goals.group(1))
-        period = goals.group(2)
-        state["period_days"] = int(period.split()[0]) if period != "pending" else None
-        state["setup"] = goals.group(3)
-        state["goals"] = _GOAL_LINE_PATTERN.findall(text)
-
+    state["goal_count"] = int(header.group(1))
+    period = header.group(2)
+    state["period_days"] = int(period.split()[0]) if period != "pending" else None
+    state["waiting"] = header.group(3)
+    state["goals"] = [
+        {"text": goal_text , "count": int(count) , "last": last}
+        for goal_text , count , last in _GOAL_PATTERN.findall(text)
+    ]
     return state
 
 
@@ -215,112 +272,40 @@ async def get_state(bot , chat_id):
     return state if state is not None else _empty_state()
 
 
-async def get_streak(bot , chat_id):
-    """Reads the current streak of a user.
-
-    Args:
-        bot: The bot instance (context.bot).
-        chat_id (int): Private chat id (same as the user id).
-
-    Returns:
-        int: The current streak, or 0 if there is no status yet.
-    """
-    state , _ = await _read_state(bot , chat_id)
-    if state is None:
-        return 0
-    return state["streak"]
-
-
-async def init_streak(bot , chat_id):
-    """Makes sure the user has a pinned status, creating it at 0 if not.
+async def init_state(bot , chat_id):
+    """Makes sure the user has a pinned status, creating it if not.
 
     Called when the user starts the bot, so the friend can already
-    check this streak (day 0) before any day has been reported.
+    look at this chat before anything has been reported.
 
     Args:
         bot: The bot instance (context.bot).
         chat_id (int): Private chat id.
 
     Returns:
-        int: The current streak (0 when the status was just created).
+        dict: The state of the user.
     """
     state , pinned = await _read_state(bot , chat_id)
     if state is not None:
-        return state["streak"]
-    await _write_state(bot , chat_id , _empty_state() , pinned)
-    return 0
-
-
-async def report_day(bot , chat_id):
-    """Registers today as a completed day and updates the streak.
-
-    The streak rules are:
-        - Last report was today: nothing changes, the report does not count.
-        - Last report was yesterday: the streak continues (+1).
-        - Last report is older, or there is no status yet: restarts at 1.
-
-    Args:
-        bot: The bot instance (context.bot).
-        chat_id (int): Private chat id.
-
-    Returns:
-        tuple[int, bool]: The streak after the report, and whether the
-        report counted (False means the user had already reported today).
-    """
-    today = _today().isoformat()
-    yesterday = (_today() - timedelta(days=1)).isoformat()
-
-    state , pinned = await _read_state(bot , chat_id)
-    if state is None:
-        state = _empty_state()
-        state["streak"] = 1
-    elif state["last_report"] == today:
-        return state["streak"] , False
-    elif state["last_report"] == yesterday:
-        state["streak"] += 1
-    else:
-        state["streak"] = 1
-
-    state["last_report"] = today
+        return state
+    state = _empty_state()
     await _write_state(bot , chat_id , state , pinned)
-    return state["streak"] , True
-
-
-async def reset_streak(bot , chat_id):
-    """Sets the user's streak back to 0 (they lost).
-
-    The goals are kept: losing the streak does not mean the user wants
-    to write all of them again.
-
-    Args:
-        bot: The bot instance (context.bot).
-        chat_id (int): Private chat id.
-    """
-    state , pinned = await _read_state(bot , chat_id)
-    if state is None:
-        state = _empty_state()
-    state["streak"] = 0
-    state["last_report"] = "none"
-    await _write_state(bot , chat_id , state , pinned)
+    return state
 
 
 async def begin_goal_setup(bot , chat_id):
     """Starts the goals questionnaire: the bot now waits for a number.
 
-    Any goals added before are dropped, because the user is about to
-    say again how many goals there will be.
+    Any goal added before is dropped, because the user is about to say
+    again how many goals there will be.
 
     Args:
         bot: The bot instance (context.bot).
         chat_id (int): Private chat id.
     """
-    state , pinned = await _read_state(bot , chat_id)
-    if state is None:
-        state = _empty_state()
-    state["goal_count"] = 0
-    state["goals"] = []
-    state["period_days"] = None
-    state["setup"] = SETUP_COUNT
+    _ , pinned = await _read_state(bot , chat_id)
+    state = _empty_state()
+    state["waiting"] = WAITING_COUNT
     await _write_state(bot , chat_id , state , pinned)
 
 
@@ -335,13 +320,10 @@ async def set_goal_count(bot , chat_id , count):
     Returns:
         dict: The state after the change.
     """
-    state , pinned = await _read_state(bot , chat_id)
-    if state is None:
-        state = _empty_state()
+    _ , pinned = await _read_state(bot , chat_id)
+    state = _empty_state()
     state["goal_count"] = count
-    state["goals"] = []
-    state["period_days"] = None
-    state["setup"] = SETUP_GOAL
+    state["waiting"] = WAITING_GOAL
     await _write_state(bot , chat_id , state , pinned)
     return state
 
@@ -355,39 +337,17 @@ async def add_goal(bot , chat_id , text):
         text (str): The goal as the user wrote it.
 
     Returns:
-        dict: The state after the change. Its "setup" says what the bot
-        is waiting for now: another goal, or the period.
+        dict: The state after the change. Its "waiting" says what the
+        bot needs now: another goal, or the period.
     """
     state , pinned = await _read_state(bot , chat_id)
     if state is None:
         state = _empty_state()
 
-    # Everything is stored in one message, so a goal has to stay on a
-    # single line and cannot be longer than the status message allows.
-    goal = " ".join(text.split())[:MAX_GOAL_LENGTH]
-    state["goals"].append(goal)
-    state["setup"] = SETUP_GOAL if len(state["goals"]) < state["goal_count"] else SETUP_PERIOD
-
+    state["goals"].append(_new_goal(text))
+    state["waiting"] = WAITING_GOAL if len(state["goals"]) < state["goal_count"] else WAITING_PERIOD
     await _write_state(bot , chat_id , state , pinned)
     return state
-
-
-async def cancel_goal_setup(bot , chat_id):
-    """Stops the goals questionnaire, keeping what was already answered.
-
-    The announced number of goals is lowered to the goals actually
-    written, so the stored state stays coherent.
-
-    Args:
-        bot: The bot instance (context.bot).
-        chat_id (int): Private chat id.
-    """
-    state , pinned = await _read_state(bot , chat_id)
-    if state is None:
-        state = _empty_state()
-    state["goal_count"] = len(state["goals"])
-    state["setup"] = None
-    await _write_state(bot , chat_id , state , pinned)
 
 
 async def set_period(bot , chat_id , days):
@@ -405,6 +365,84 @@ async def set_period(bot , chat_id , days):
     if state is None:
         state = _empty_state()
     state["period_days"] = days
-    state["setup"] = None
+    state["waiting"] = None
     await _write_state(bot , chat_id , state , pinned)
     return state
+
+
+async def cancel_setup(bot , chat_id):
+    """Stops whatever the bot was asking, keeping the answers given.
+
+    The announced number of goals is lowered to the goals actually
+    written, so the stored state stays coherent.
+
+    Args:
+        bot: The bot instance (context.bot).
+        chat_id (int): Private chat id.
+    """
+    state , pinned = await _read_state(bot , chat_id)
+    if state is None:
+        state = _empty_state()
+    state["goal_count"] = len(state["goals"])
+    state["waiting"] = None
+    await _write_state(bot , chat_id , state , pinned)
+
+
+async def begin_report(bot , chat_id):
+    """Starts the daily report: the bot now waits for a yes or a no.
+
+    Args:
+        bot: The bot instance (context.bot).
+        chat_id (int): Private chat id.
+
+    Returns:
+        dict: The state after the change.
+    """
+    state , pinned = await _read_state(bot , chat_id)
+    if state is None:
+        state = _empty_state()
+    state["waiting"] = WAITING_REPORT
+    await _write_state(bot , chat_id , state , pinned)
+    return state
+
+
+async def answer_goal(bot , chat_id , achieved):
+    """Answers the goal the bot is currently asking about.
+
+    A goal achieved today continues its streak (+1 when it was also
+    achieved yesterday, 1 otherwise). A goal missed today goes back to
+    0: every goal is its own streak.
+
+    Args:
+        bot: The bot instance (context.bot).
+        chat_id (int): Private chat id.
+        achieved (bool): The user's answer for that goal.
+
+    Returns:
+        tuple[dict, dict | None]: The state after the change, and the
+        goal that was just answered (None when there was nothing left
+        to answer).
+    """
+    state , pinned = await _read_state(bot , chat_id)
+    if state is None:
+        return _empty_state() , None
+
+    index = next_pending(state)
+    if index is None:
+        return state , None
+
+    goal = state["goals"][index]
+    if achieved:
+        # count_of() is 0 unless the streak is still alive, so this is
+        # "+1" after a good day and "restart at 1" after a broken one.
+        goal["count"] = count_of(goal) + 1
+        if state["period_days"]:
+            goal["count"] = min(goal["count"] , state["period_days"])
+    else:
+        goal["count"] = 0
+    goal["last"] = _today().isoformat()
+
+    if next_pending(state) is None:
+        state["waiting"] = None
+    await _write_state(bot , chat_id , state , pinned)
+    return state , goal

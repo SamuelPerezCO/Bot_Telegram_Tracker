@@ -1,6 +1,6 @@
 # Bot_Telegram_Tracker
 
-A Telegram bot that tracks a daily streak for a personal goal. Report every day you keep the streak alive - miss a day and it restarts.
+A Telegram bot that tracks a daily streak for each of your personal goals. Write your goals and the period you give yourself, then report every day, goal by goal - miss one and only that one restarts.
 
 Bot: [t.me/Tracker90Bot](https://t.me/Tracker90Bot)
 
@@ -8,14 +8,14 @@ Bot: [t.me/Tracker90Bot](https://t.me/Tracker90Bot)
 
 ## Features
 
-- Daily streak tracking per Telegram user
-- Report a completed day (only counts once per day)
-- Streak continues if you reported yesterday, restarts if you missed a day
-- Reset your streak when you lose
-- Check your friend's streak from your own chat
-- Streak starts at 0 as soon as you `/start` the bot, so your friend can check it right away
-- No database: the streak is stored in the chat's pinned message
-- Your current streak is always visible at the top of the chat
+- Write your own goals: the bot asks how many, then asks for them one by one
+- Choose the period you give yourself to complete them (`90 days`, `2 weeks`, `3 months`)
+- Daily report goal by goal: one question per goal, Yes or No
+- Every goal is its own streak, shown as `12/90`: a No sends only that goal back to 0
+- Answering only counts once per day, and an interrupted report continues where it stopped
+- Check your friend's goals from your own chat
+- No database: everything is stored in the chat's pinned message
+- Your goals and their counters are always visible at the top of the chat
 
 ---
 
@@ -68,11 +68,24 @@ python run_local.py
 Then in Telegram:
 
 1. Send `/start` to the bot.
-2. Answer the "Who are you?" question - the bot shows your current streak (created at 0 on the first time).
+2. Answer the "Who are you?" question - the bot shows your goals and the menu.
 3. Choose an option:
-   - **I want to report a new day** -> adds today to your streak.
-   - **I want to report that I lose** -> resets your streak to 0.
-   - **I want to see my friend's streak** -> shows the other user's streak.
+   - **I want to add my goals** -> the bot asks how many goals you want, then asks for each one, and finally for the period you give yourself to complete them.
+   - **I want to report my day** -> the bot asks about every goal, one message each: answer **Yes** to add a day to that goal, **No** to send it back to 0.
+   - **I want to see my goals** -> shows your goals with their counters.
+   - **I want to see my friend's goals** -> shows the other user's goals.
+
+While the bot is asking for your goals, writing `cancel` stops the questions and keeps what you already answered.
+
+A report looks like this:
+
+```
+1. Wake Up at 5:00 am 12/90
+2. Journal 12/90
+3. No FAP 0/90
+4. No Porn 12/90
+5. Diary Commit 12/90
+```
 
 Extra command: `/id` replies with your chat id (used once to fill `HI_CHAT_ID` and `TORNILLO_CHAT_ID`).
 
@@ -115,7 +128,7 @@ src/
 |-- Controllers/
 |   |-- tracker_controller.py    # Conversation flow: questions, buttons and replies
 |-- Models/
-    |-- streak_model.py          # Streak logic, stored in the chat's pinned message
+    |-- streak_model.py          # Goals and their streaks, stored in the pinned message
 vercel.json                      # Function config (bundles src/ with the function)
 ```
 
@@ -125,19 +138,31 @@ vercel.json                      # Function config (bundles src/ with the functi
 
 The bot keeps **no state in memory**. On a serverless host every update may be served by a different instance, so a `ConversationHandler` (which remembers the step each user is in) would forget the conversation between two messages. Instead, each step shows buttons with different texts and every message is routed by its own text:
 
-- `El Hi` / `El tornillo` - answer to the first question, shows the streak and the menu.
-- `I want to ...` - one of the three menu options.
-- Anything else - the bot asks the user to press a button or send `/start`.
+- `El Hi` / `El tornillo` - answer to the first question, shows the goals and the menu.
+- `I want to ...` - one of the four menu options.
+- Anything else - either the answer to a question the bot asked (a goal, a period, a Yes/No), or a reminder to press a button.
 
-There is no database either. Telegram bots cannot read the chat history, but they can read the chat's **pinned message**, so the bot stores each user's streak in a pinned status message like `Streak: 5 (last report: 2026-07-13)` and reads it back with `get_chat`. The data lives inside Telegram itself, so it survives restarts and redeploys - which is exactly what a serverless host needs, since it has no disk of its own. When a day is reported:
+There is no database either. Telegram bots cannot read the chat history, but they can read the chat's **pinned message**, so the bot stores everything in a pinned status message and reads it back with `get_chat`. The data lives inside Telegram itself, so it survives restarts and redeploys - which is exactly what a serverless host needs, since it has no disk of its own:
 
-- Last report was **today** -> already reported, nothing changes.
-- Last report was **yesterday** -> streak + 1.
-- Anything **older** (or a new user) -> streak restarts at 1.
+```
+🎯 Goals (5, period: 90 days)
+1. Wake Up at 5:00 am 12/90 (last: 2026-08-09)
+2. Journal 12/90 (last: 2026-08-09)
+3. No FAP 0/90 (last: 2026-08-09)
+```
 
-Each private chat has its own pinned message, so each user has their own independent streak.
+The questions that need a free text answer (how many goals, each goal, the period, and the Yes/No of every goal) also need to remember what was asked, so the same pinned message carries it: the header ends with `[waiting: goal]` or `[waiting: report]` while a question is open, and nothing when the user is back in the menu. That is what lets the questionnaire survive being served by five different serverless instances.
 
-The friend's streak works the same way: a private chat id equals the user's Telegram id, and the bot can read the pinned message of any chat it knows. With `HI_CHAT_ID` and `TORNILLO_CHAT_ID` configured, the bot reads the *other* user's pinned message to answer "I want to see my friend's streak".
+Each goal is its own streak, with its own last answer. When a goal is reported:
+
+- Answered **yes** and it was also achieved **yesterday** -> counter + 1.
+- Answered **yes** after a break (or for the first time) -> counter restarts at 1.
+- Answered **no** -> counter back to 0. The other goals are not touched.
+- Already answered **today** -> the bot does not ask about it again.
+
+The last rule is also what makes an interrupted report resume by itself: the next question is simply the first goal that has no answer for today.
+
+Each private chat has its own pinned message, so each user has their own independent goals. The friend's goals work the same way: a private chat id equals the user's Telegram id, and the bot can read the pinned message of any chat it knows. With `HI_CHAT_ID` and `TORNILLO_CHAT_ID` configured, the bot reads the *other* user's pinned message to answer "I want to see my friend's goals".
 
 ---
 
@@ -155,7 +180,7 @@ The friend's streak works the same way: a private chat id equals the user's Tele
 
 ## Notes
 
-- Do not unpin or delete the bot's pinned status message - it IS the storage. If it disappears, the streak starts over.
+- Do not unpin or delete the bot's pinned status message - it IS the storage. If it disappears, the goals and their counters are gone.
 - Handlers must be registered **before** `run_polling()` - anything after it never runs.
 - Polling and the webhook are mutually exclusive in Telegram. If the bot ignores you locally, the webhook is probably still set: `python scripts/set_webhook.py delete`.
 - The webhook always answers `200`, even when an update fails. A different code makes Telegram redeliver the same update for hours; the real error is in the Vercel function logs.
