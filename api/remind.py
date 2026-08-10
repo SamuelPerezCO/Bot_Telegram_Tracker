@@ -1,14 +1,20 @@
-"""Vercel entry point for the daily reminder.
+"""Vercel entry point for the reminders.
 
 Nothing runs between two updates on a serverless host, so the bot
-cannot wake itself up at 18:00. An external scheduler (cron-job.org)
-calls this URL once a day and the function sends the reminder:
+cannot wake itself up. An external scheduler (cron-job.org) calls this
+URL every minute and the function decides what is due:
 
     https://<project>.vercel.app/api/remind?key=<CRON_SECRET>
 
+- The reminder of every goal whose hour has just arrived. Each user
+  chooses that hour when writing the goal, so the times are data and
+  not configuration: only this endpoint has to run often enough.
+- The summary of what is still pending, once a day at DAILY_REMINDER
+  (18:00 by default, "off" to disable it).
+
 The key can also travel as an X-Cron-Secret header. Without it the
 request is rejected, otherwise anybody could make the bot write to
-both users as many times as they wanted.
+every user as many times as they wanted.
 
 See api/index.py for the two naming rules this file also follows.
 """
@@ -39,31 +45,41 @@ for _candidate in (
 IMPORT_ERROR = None
 try:
     from bot import build_application
-    from Controllers.tracker_controller import send_daily_reminders
+    from Controllers.tracker_controller import send_due_reminders , send_daily_reminders
+    from Models import streak_model
 except Exception:
     IMPORT_ERROR = traceback.format_exc()
     print(IMPORT_ERROR , file=sys.stderr)
 
 
-# Shared secret the scheduler has to send, so the reminder cannot be
+# Shared secret the scheduler has to send, so the reminders cannot be
 # triggered by anybody who finds the URL.
 CRON_SECRET = os.getenv("CRON_SECRET")
 
 
 async def _remind():
-    """Builds the bot and sends the reminders.
+    """Builds the bot and sends whatever is due right now.
 
     The application is created, started and shut down inside the
     request, exactly like in api/index.py: a serverless instance may be
     frozen or destroyed right after the response.
 
     Returns:
-        list[str]: What was done for each user.
+        list[str]: What was done, for the scheduler log.
     """
     application = build_application()
     await application.initialize()
     try:
-        return await send_daily_reminders(application.bot)
+        report = await send_due_reminders(application.bot)
+
+        # The summary has no "already sent" mark of its own, so it goes
+        # out on the exact minute instead of within a catch-up window:
+        # missing a summary matters much less than sending it twice.
+        daily = os.getenv("DAILY_REMINDER" , "18:00").strip()
+        if daily.lower() not in ("" , "off") and daily == streak_model.now_hhmm():
+            report += await send_daily_reminders(application.bot)
+
+        return report
     finally:
         await application.shutdown()
 
@@ -72,7 +88,7 @@ class handler(BaseHTTPRequestHandler):
     """HTTP entry point expected by the Vercel Python runtime."""
 
     def do_GET(self):
-        """Sends the reminder. Called by the scheduler once a day."""
+        """Sends what is due. Called by the scheduler every minute."""
         if IMPORT_ERROR:
             self._reply(500 , f"The bot modules could not be imported.\n\n{IMPORT_ERROR}")
             return
@@ -94,7 +110,9 @@ class handler(BaseHTTPRequestHandler):
             self._reply(500 , f"Error sending the reminders: {error!r}")
             return
 
-        self._reply(200 , "\n".join(report) or "no users configured")
+        # Most of the 1440 runs of a day have nothing to do, and saying
+        # so keeps the scheduler log readable.
+        self._reply(200 , "\n".join(report) or "nothing due")
 
     # cron-job.org can be configured to POST instead of GET, so both do
     # the same thing.

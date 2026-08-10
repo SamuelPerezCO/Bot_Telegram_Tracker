@@ -45,6 +45,7 @@ IMPORT_ERROR = None
 try:
     from telegram import Update
     from bot import build_application
+    from Controllers import tracker_controller
 except Exception:
     IMPORT_ERROR = traceback.format_exc()
     print(IMPORT_ERROR , file=sys.stderr)
@@ -114,15 +115,22 @@ class handler(BaseHTTPRequestHandler):
             self._reply(500 , "\n".join(report))
             return
 
-        missing = [name for name in ("TOKEN_BOT" , "HI_CHAT_ID" , "TORNILLO_CHAT_ID") if not os.getenv(name)]
-        if missing:
-            self._reply(500 , f"Missing environment variables: {' , '.join(missing)}")
+        if not os.getenv("TOKEN_BOT"):
+            self._reply(500 , "Missing environment variable: TOKEN_BOT")
+            return
+
+        # The people are configured in USERS, with the two old
+        # variables still accepted; the controller knows both forms.
+        users = tracker_controller.configured_users()
+        if not users:
+            self._reply(500 , "No users configured: set USERS to \"name:chat_id\" pairs separated by commas")
             return
 
         # Only whether it exists, never the value: a secret that does not
         # match the one used to register the webhook rejects every update.
         secret_state = "set" if WEBHOOK_SECRET else "not set (updates are not verified)"
-        self._reply(200 , f"Tracker bot webhook is alive\nwebhook secret: {secret_state}")
+        people = " , ".join(name for _ , name in users)
+        self._reply(200 , f"Tracker bot webhook is alive\nwebhook secret: {secret_state}\nusers: {people}")
 
     def _reply(self , status , text):
         """Writes a plain text response.

@@ -9,12 +9,16 @@ Every goal is its own streak: it counts the days in a row it has been
 achieved, out of the period the user asked for. Answering "no" for a
 goal sends only that goal back to 0, the others keep their count.
 
+Each goal can also have a time at which the bot reminds the user about
+it, and the day that reminder was last sent (so it is sent once a day
+and never twice).
+
 The pinned message looks like this:
 
     🎯 Goals (5, period: 90 days)
-    1. Wake Up at 5:00 am 12/90 (last: 2026-08-09)
-    2. Journal 12/90 (last: 2026-08-09)
-    3. No FAP 0/90 (last: 2026-08-09)
+    1. Wake Up at 5:00 am 12/90 (last: 2026-08-09, at: 05:00, sent: 2026-08-09)
+    2. Journal 12/90 (last: 2026-08-09, at: 22:00, sent: none)
+    3. No FAP 0/90 (last: 2026-08-09, at: none, sent: none)
 
 While the bot is waiting for an answer it also writes what it asked
 for, because nothing can be kept in memory between two updates on a
@@ -37,35 +41,67 @@ MAX_GOAL_LENGTH = 200
 # What the bot is waiting for, stored in the pinned message:
 #   "count"  -> how many goals the user wants
 #   "goal"   -> the text of the next goal
+#   "time"   -> at what time that goal should be reminded
 #   "period" -> the time to complete all of them
 #   "report" -> whether the next goal was achieved today
 #   None     -> nothing pending, the user is in the normal menu
 WAITING_COUNT = "count"
 WAITING_GOAL = "goal"
+WAITING_TIME = "time"
 WAITING_PERIOD = "period"
 WAITING_REPORT = "report"
+
+# How late a reminder may still be sent, in minutes. A scheduler run
+# can be missed (a cold start, a network hiccup), so the reminder is
+# not tied to one exact minute; but a goal whose time passed hours ago
+# is left alone instead of arriving in the middle of the night.
+CATCH_UP_MINUTES = 60
 
 # How many days each unit is worth when the user writes "2 weeks".
 _PERIOD_UNITS = {"day": 1 , "days": 1 , "week": 7 , "weeks": 7 , "month": 30 , "months": 30}
 
 _HEADER_PATTERN = re.compile(r"Goals \((\d+), period: ([^)]+)\)(?: \[waiting: (\w+)\])?")
-_GOAL_PATTERN = re.compile(r"^\d+\. (.+?) (\d+)/(?:\d+|\?) \(last: (\S+)\)$" , re.MULTILINE)
+# The reminder part is optional so the goals written before this
+# feature existed are still read correctly.
+_GOAL_PATTERN = re.compile(
+    r"^\d+\. (.+?) (\d+)/(?:\d+|\?) \(last: (\S+?)(?:, at: (\S+?), sent: (\S+?))?\)$" ,
+    re.MULTILINE
+)
 _PERIOD_PATTERN = re.compile(r"^(\d+)\s*([a-z]+)?$" , re.IGNORECASE)
+_TIME_PATTERN = re.compile(r"^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$" , re.IGNORECASE)
+
+
+def _now():
+    """Current time in the users' timezone, not the server's.
+
+    The server may run in another timezone (Vercel uses UTC), so there
+    the date already flips to the next day during the evening here and
+    a reminder set for 05:00 would arrive at midnight. The timezone
+    comes from the TIMEZONE environment variable and defaults to
+    America/Bogota.
+
+    Returns:
+        datetime.datetime: Now, for the users.
+    """
+    return datetime.now(ZoneInfo(os.getenv("TIMEZONE" , "America/Bogota")))
 
 
 def _today():
-    """Current date in the users' timezone, not the server's.
-
-    The server may run in another timezone (Vercel uses UTC), so there
-    date.today() already flips to the next day during the evening here.
-    The timezone comes from the TIMEZONE environment variable and
-    defaults to America/Bogota.
+    """Today's date in the users' timezone.
 
     Returns:
         datetime.date: Today's date for the users.
     """
-    timezone = ZoneInfo(os.getenv("TIMEZONE" , "America/Bogota"))
-    return datetime.now(timezone).date()
+    return _now().date()
+
+
+def now_hhmm():
+    """Current time of day for the users, as written in the status.
+
+    Returns:
+        str: Now as "HH:MM".
+    """
+    return _now().strftime("%H:%M")
 
 
 def today_iso():
@@ -93,11 +129,49 @@ def _new_goal(text):
         text (str): The goal as the user wrote it.
 
     Returns:
-        dict: The goal, with its counter at 0.
+        dict: The goal, with its counter at 0 and no reminder yet.
     """
     # Everything is stored in one message, so a goal has to stay on a
     # single line and cannot be longer than the status message allows.
-    return {"text": " ".join(text.split())[:MAX_GOAL_LENGTH] , "count": 0 , "last": "none"}
+    return {
+        "text": " ".join(text.split())[:MAX_GOAL_LENGTH] ,
+        "count": 0 ,
+        "last": "none" ,
+        "time": "none" ,   # hour of the reminder, "none" when there is none
+        "sent": "none" ,   # day that reminder was last sent
+    }
+
+
+def parse_time(text):
+    """Reads an hour written by the user.
+
+    Accepts "5", "5:00", "05:00", "5 am", "5:30pm", "17:30".
+
+    Args:
+        text (str): What the user typed.
+
+    Returns:
+        str | None: The hour as "HH:MM", or None if it is not a valid
+        hour.
+    """
+    match = _TIME_PATTERN.match((text or "").strip())
+    if match is None:
+        return None
+
+    hour = int(match.group(1))
+    minute = int(match.group(2) or 0)
+    half = (match.group(3) or "").lower()
+    if minute > 59:
+        return None
+
+    if half:
+        if not 1 <= hour <= 12:
+            return None
+        hour = hour % 12 + (12 if half == "pm" else 0)
+    elif hour > 23:
+        return None
+
+    return f"{hour:02d}:{minute:02d}"
 
 
 def count_of(goal):
@@ -152,6 +226,36 @@ def next_pending(state):
     return None
 
 
+def due_reminders(state):
+    """Finds the goals whose reminder should be sent right now.
+
+    A reminder is due when its hour has arrived (or passed by less than
+    CATCH_UP_MINUTES), it was not sent today already, and the goal has
+    no answer for today yet - reminding somebody about something they
+    already reported is only noise.
+
+    Args:
+        state (dict): The state of the user.
+
+    Returns:
+        list[tuple[int, dict]]: (number of the goal, goal) for each
+        reminder to send now.
+    """
+    now = _now()
+    today = now.date().isoformat()
+
+    due = []
+    for number , goal in enumerate(state["goals"] , 1):
+        if goal["time"] == "none" or goal["sent"] == today or goal["last"] == today:
+            continue
+        hour , minute = goal["time"].split(":")
+        moment = now.replace(hour=int(hour) , minute=int(minute) , second=0 , microsecond=0)
+        late_minutes = (now - moment).total_seconds() / 60
+        if 0 <= late_minutes <= CATCH_UP_MINUTES:
+            due.append((number , goal))
+    return due
+
+
 def parse_period(text):
     """Reads a period of time written by the user.
 
@@ -195,7 +299,10 @@ def _format_status(state):
     lines = [header]
     denominator = state["period_days"] or "?"
     for number , goal in enumerate(state["goals"] , 1):
-        lines.append(f"{number}. {goal['text']} {goal['count']}/{denominator} (last: {goal['last']})")
+        lines.append(
+            f"{number}. {goal['text']} {goal['count']}/{denominator}"
+            f" (last: {goal['last']}, at: {goal['time']}, sent: {goal['sent']})"
+        )
     return "\n".join(lines)
 
 
@@ -219,8 +326,8 @@ def _parse_status(text):
     state["period_days"] = int(period.split()[0]) if period != "pending" else None
     state["waiting"] = header.group(3)
     state["goals"] = [
-        {"text": goal_text , "count": int(count) , "last": last}
-        for goal_text , count , last in _GOAL_PATTERN.findall(text)
+        {"text": goal_text , "count": int(count) , "last": last , "time": time or "none" , "sent": sent or "none"}
+        for goal_text , count , last , time , sent in _GOAL_PATTERN.findall(text)
     ]
     return state
 
@@ -311,11 +418,15 @@ async def begin_goal_setup(bot , chat_id):
     Args:
         bot: The bot instance (context.bot).
         chat_id (int): Private chat id.
+
+    Returns:
+        dict: The state after the change.
     """
     _ , pinned = await _read_state(bot , chat_id)
     state = _empty_state()
     state["waiting"] = WAITING_COUNT
     await _write_state(bot , chat_id , state , pinned)
+    return state
 
 
 async def set_goal_count(bot , chat_id , count):
@@ -346,17 +457,58 @@ async def add_goal(bot , chat_id , text):
         text (str): The goal as the user wrote it.
 
     Returns:
-        dict: The state after the change. Its "waiting" says what the
-        bot needs now: another goal, or the period.
+        dict: The state after the change. The bot now needs the hour of
+        that goal's reminder.
     """
     state , pinned = await _read_state(bot , chat_id)
     if state is None:
         state = _empty_state()
 
     state["goals"].append(_new_goal(text))
+    state["waiting"] = WAITING_TIME
+    await _write_state(bot , chat_id , state , pinned)
+    return state
+
+
+async def set_goal_time(bot , chat_id , time):
+    """Stores the reminder hour of the goal just written.
+
+    Args:
+        bot: The bot instance (context.bot).
+        chat_id (int): Private chat id.
+        time (str): Hour as "HH:MM", or "none" for no reminder.
+
+    Returns:
+        dict: The state after the change. Its "waiting" says what the
+        bot needs now: another goal, or the period.
+    """
+    state , pinned = await _read_state(bot , chat_id)
+    if state is None or not state["goals"]:
+        return await begin_goal_setup(bot , chat_id)
+
+    state["goals"][-1]["time"] = time
     state["waiting"] = WAITING_GOAL if len(state["goals"]) < state["goal_count"] else WAITING_PERIOD
     await _write_state(bot , chat_id , state , pinned)
     return state
+
+
+async def mark_reminders_sent(bot , chat_id , numbers):
+    """Writes down that today's reminders were already sent.
+
+    Args:
+        bot: The bot instance.
+        chat_id (int): Private chat id.
+        numbers (list[int]): Numbers of the goals that were reminded,
+            as given by due_reminders.
+    """
+    state , pinned = await _read_state(bot , chat_id)
+    if state is None:
+        return
+    today = today_iso()
+    for number in numbers:
+        if 1 <= number <= len(state["goals"]):
+            state["goals"][number - 1]["sent"] = today
+    await _write_state(bot , chat_id , state , pinned)
 
 
 async def set_period(bot , chat_id , days):

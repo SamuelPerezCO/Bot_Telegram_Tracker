@@ -26,6 +26,67 @@ CANCEL_WORD = "cancel"
 YES_ANSWERS = {"yes" , "y" , "si" , "sí" , "yeah" , "yep" , "✅"}
 NO_ANSWERS = {"no" , "n" , "nope" , "nah" , "❌"}
 
+# Answers that mean "this goal does not need a reminder".
+SKIP_ANSWERS = {"no" , "none" , "skip" , "nada" , "-"}
+
+
+def configured_users():
+    """Lists the people using the bot, from the environment.
+
+    They are configured in USERS as "name:chat_id" pairs:
+
+        USERS=El Hi:12345,El tornillo:67890,Samuel:24680
+
+    Adding somebody is only adding a pair there, no code changes. The
+    older HI_CHAT_ID / TORNILLO_CHAT_ID variables still work when USERS
+    is not set, so an existing deployment keeps running until it is.
+
+    Returns:
+        list[tuple[int, str]]: (chat_id, name) of every configured user.
+    """
+    users = []
+    for entry in os.getenv("USERS" , "").split(","):
+        entry = entry.strip()
+        if not entry or ":" not in entry:
+            continue
+        name , _ , chat_id = entry.rpartition(":")
+        if chat_id.strip().lstrip("-").isdigit():
+            users.append((int(chat_id.strip()) , name.strip()))
+
+    if not users:
+        for variable , name in (("HI_CHAT_ID" , "El Hi") , ("TORNILLO_CHAT_ID" , "El tornillo")):
+            chat_id = os.getenv(variable)
+            if chat_id:
+                users.append((int(chat_id) , name))
+    return users
+
+
+def _friends_of(chat_id):
+    """Lists everybody except the user asking.
+
+    Args:
+        chat_id (int): Chat id of the user asking.
+
+    Returns:
+        list[tuple[int, str]]: (chat_id, name) of the other users.
+    """
+    return [user for user in configured_users() if user[0] != chat_id]
+
+
+def _name_of(chat_id):
+    """Name of one user, for the messages sent to the others.
+
+    Args:
+        chat_id (int): Chat id to look up.
+
+    Returns:
+        str: The configured name, or "Somebody" when it is unknown.
+    """
+    for user_id , name in configured_users():
+        if user_id == chat_id:
+            return name
+    return "Somebody"
+
 
 def menu_keyboard():
     """Builds the keyboard with the actions of the main menu.
@@ -38,7 +99,7 @@ def menu_keyboard():
     """
     return ReplyKeyboardMarkup([
         [KeyboardButton("I want to report my day")] ,
-        [KeyboardButton("I want to see my goals") , KeyboardButton("I want to see my friend's goals")] ,
+        [KeyboardButton("I want to see my goals") , KeyboardButton("I want to see my friends' goals")] ,
         [KeyboardButton("I want to add my goals")]
     ])
 
@@ -65,7 +126,8 @@ def _goals_list(state):
     lines = []
     for number , goal in enumerate(state["goals"] , 1):
         done = " 🏆" if streak_model.is_complete(goal , state["period_days"]) else ""
-        lines.append(f"{number}. {goal['text']} {streak_model.count_of(goal)}/{denominator}{done}")
+        alarm = f" ⏰{goal['time']}" if goal["time"] != "none" else ""
+        lines.append(f"{number}. {goal['text']} {streak_model.count_of(goal)}/{denominator}{alarm}{done}")
     return "\n".join(lines)
 
 
@@ -92,58 +154,67 @@ async def _ask_next_goal(update , state):
     return True
 
 
-def _friend_of(chat_id):
-    """Finds the chat id and name of the OTHER user (the friend).
-
-    The two private chat ids are configured in the environment as
-    HI_CHAT_ID (El Hi) and TORNILLO_CHAT_ID (El tornillo). A private
-    chat id is the same as the user's Telegram id.
-
-    Args:
-        chat_id (int): Chat id of the user asking.
-
-    Returns:
-        tuple[int, str, str] | tuple[None, None, None]: (friend_chat_id,
-        friend_name, own_name), or (None, None, None) if the ids are
-        not configured.
-    """
-    hi_id = os.getenv("HI_CHAT_ID")
-    tornillo_id = os.getenv("TORNILLO_CHAT_ID")
-    if not hi_id or not tornillo_id:
-        return None , None , None
-    if str(chat_id) == hi_id:
-        return int(tornillo_id) , "El tornillo" , "El Hi"
-    return int(hi_id) , "El Hi" , "El tornillo"
-
-
-async def _notify_friend(bot , chat_id , state):
-    """Tells the friend that this user just reported his day.
+async def _notify_friends(bot , chat_id , state):
+    """Tells everybody else that this user just reported the day.
 
     Args:
         bot: The bot instance (context.bot).
         chat_id (int): Chat id of the user who reported.
         state (dict): State of the user after the report.
     """
-    friend_id , _ , own_name = _friend_of(chat_id)
-    if friend_id is None:
-        return
-    try:
-        await bot.send_message(friend_id , f"{own_name} just reported his day!\n\n{_goals_list(state)}")
-    except Exception:
-        pass  # the friend has not started the bot yet, nothing to do
+    own_name = _name_of(chat_id)
+    for friend_id , _ in _friends_of(chat_id):
+        try:
+            await bot.send_message(friend_id , f"{own_name} just reported the day!\n\n{_goals_list(state)}")
+        except Exception:
+            pass  # that friend has not started the bot yet, nothing to do
 
-def _configured_users():
-    """Lists the users the bot knows, from the environment.
+
+async def send_due_reminders(bot):
+    """Sends the reminder of every goal whose hour has arrived.
+
+    Called by the scheduled endpoint (api/remind.py) once a minute.
+    The hour of each goal is stored with the goal itself, so this is
+    the only place that decides whether it is time.
+
+    Args:
+        bot: The bot instance.
 
     Returns:
-        list[tuple[int, str]]: (chat_id, name) of every configured user.
+        list[str]: One line per user for the scheduler log.
     """
-    users = []
-    for variable , name in (("HI_CHAT_ID" , "El Hi") , ("TORNILLO_CHAT_ID" , "El tornillo")):
-        chat_id = os.getenv(variable)
-        if chat_id:
-            users.append((int(chat_id) , name))
-    return users
+    report = []
+    for chat_id , name in configured_users():
+        try:
+            state = await streak_model.get_state(bot , chat_id)
+        except Exception as error:
+            report.append(f"{name}: could not read the chat ({error!r})")
+            continue
+
+        due = streak_model.due_reminders(state)
+        if not due:
+            continue
+
+        sent = []
+        for number , goal in due:
+            text = (
+                f"⏰ {goal['time']} - {goal['text']}\n"
+                f"{streak_model.count_of(goal)}/{state['period_days'] or '?'} so far. Is it done?"
+            )
+            try:
+                await bot.send_message(chat_id , text , reply_markup=menu_keyboard())
+            except Exception as error:
+                report.append(f"{name}: could not send the reminder of goal {number} ({error!r})")
+                continue
+            sent.append(number)
+
+        if sent:
+            # Written down only after the message left, so a failure is
+            # retried on the next run instead of being lost.
+            await streak_model.mark_reminders_sent(bot , chat_id , sent)
+            report.append(f"{name}: reminded about goal(s) {' , '.join(str(number) for number in sent)}")
+
+    return report
 
 
 async def send_daily_reminders(bot):
@@ -160,7 +231,7 @@ async def send_daily_reminders(bot):
         log shows why somebody was not written to.
     """
     report = []
-    for chat_id , name in _configured_users():
+    for chat_id , name in configured_users():
         try:
             state = await streak_model.get_state(bot , chat_id)
         except Exception as error:
@@ -202,8 +273,8 @@ class tracker_controller:
     async def chat_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Replies with the chat id (/id command).
 
-        Used once per user to get the values for HI_CHAT_ID and
-        TORNILLO_CHAT_ID in the environment.
+        Used once per person to build the USERS variable of the
+        environment.
 
         Args:
             update: Incoming Telegram update.
@@ -219,9 +290,14 @@ class tracker_controller:
             update: Incoming Telegram update.
             context: Handler context provided by python-telegram-bot.
         """
-        keyboard = ReplyKeyboardMarkup([
-            [KeyboardButton("El Hi") , KeyboardButton("El tornillo")]
-        ])
+        names = [name for _ , name in configured_users()]
+        if not names:
+            # Nobody configured yet: skip the question instead of
+            # showing an empty keyboard.
+            await tracker_controller.who_are_you_answer(update , context)
+            return
+
+        keyboard = ReplyKeyboardMarkup([[KeyboardButton(name) for name in names]])
         await update.message.reply_text("Who are you?" , reply_markup=keyboard)
 
     @staticmethod
@@ -268,20 +344,23 @@ class tracker_controller:
                 return
             await update.message.reply_text("Your goals:\n" + _goals_list(state) , reply_markup=menu_keyboard())
 
-        elif choice == "I want to see my friend's goals":
-            friend_id , friend_name , _ = _friend_of(chat_id)
-            if friend_id is None:
-                await update.message.reply_text("Friend ids are not configured (set HI_CHAT_ID and TORNILLO_CHAT_ID)" , reply_markup=menu_keyboard())
+        elif choice == "I want to see my friends' goals":
+            friends = _friends_of(chat_id)
+            if not friends:
+                await update.message.reply_text("Nobody else is configured yet (set USERS)" , reply_markup=menu_keyboard())
                 return
-            try:
-                state = await streak_model.get_state(context.bot , friend_id)
-            except Exception:
-                await update.message.reply_text(f"I could not reach {friend_name}'s chat. Has he started the bot?" , reply_markup=menu_keyboard())
-                return
-            if not state["goals"]:
-                await update.message.reply_text(f"{friend_name} has no goals yet." , reply_markup=menu_keyboard())
-                return
-            await update.message.reply_text(f"{friend_name}'s goals:\n" + _goals_list(state) , reply_markup=menu_keyboard())
+
+            # One message with everybody, so it stays readable however
+            # many people end up using the bot.
+            blocks = []
+            for friend_id , friend_name in friends:
+                try:
+                    state = await streak_model.get_state(context.bot , friend_id)
+                except Exception:
+                    blocks.append(f"{friend_name}: I could not reach the chat. Has he started the bot?")
+                    continue
+                blocks.append(f"{friend_name}:\n" + (_goals_list(state) if state["goals"] else "no goals yet"))
+            await update.message.reply_text("\n\n".join(blocks) , reply_markup=menu_keyboard())
 
         elif choice == "I want to add my goals":
             await streak_model.begin_goal_setup(context.bot , chat_id)
@@ -328,11 +407,28 @@ class tracker_controller:
 
         elif waiting == streak_model.WAITING_GOAL:
             state = await streak_model.add_goal(context.bot , chat_id , text)
+            await update.message.reply_text(
+                f"At what time do you want a reminder for \"{state['goals'][-1]['text']}\"?\n"
+                "For example: 5:00, 17:30, 9 pm\n"
+                "Answer \"no\" if you do not want one."
+            )
+
+        elif waiting == streak_model.WAITING_TIME:
+            if text.lower() in SKIP_ANSWERS:
+                time = "none"
+            else:
+                time = streak_model.parse_time(text)
+                if time is None:
+                    await update.message.reply_text("I did not understand that hour. Try something like: 5:00, 17:30, 9 pm - or \"no\"")
+                    return
+
+            state = await streak_model.set_goal_time(context.bot , chat_id , time)
+            confirmation = f"Reminder set at {time} ⏰" if time != "none" else "No reminder for that one"
             if state["waiting"] == streak_model.WAITING_GOAL:
-                await update.message.reply_text(f"Tell me goal number {len(state['goals']) + 1}")
+                await update.message.reply_text(f"{confirmation}\n\nTell me goal number {len(state['goals']) + 1}")
             else:
                 await update.message.reply_text(
-                    f"I have your {state['goal_count']} goals.\n"
+                    f"{confirmation}\n\nI have your {state['goal_count']} goals.\n"
                     "In how much time do you want to complete all of them?\n"
                     "For example: 90 days, 2 weeks, 3 months"
                 )
@@ -365,4 +461,4 @@ class tracker_controller:
             if await _ask_next_goal(update , state):
                 return
             await update.message.reply_text("Day reported!\n\n" + _goals_list(state) , reply_markup=menu_keyboard())
-            await _notify_friend(context.bot , chat_id , state)
+            await _notify_friends(context.bot , chat_id , state)
