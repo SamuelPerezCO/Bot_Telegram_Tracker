@@ -545,7 +545,7 @@ class tracker_controller:
             state = await streak_model.set_period(context.bot , chat_id , days)
             await update.message.reply_text(
                 f"These are your goals, {days} days each:\n" + _goals_list(state) ,
-                reply_markup=menu_keyboard()
+                reply_markup=ReplyKeyboardRemove()
             )
 
         elif waiting == streak_model.WAITING_REPORT:
@@ -584,7 +584,7 @@ class tracker_controller:
             summary += _goals_list(state)
             if left:
                 summary += "\n\nStill to confirm today:\n" + "\n".join(left)
-            await update.message.reply_text(summary , reply_markup=menu_keyboard())
+            await update.message.reply_text(summary , reply_markup=ReplyKeyboardRemove())
 
             # Nothing to tell the others when everything was left for
             # later: there is no news yet.
